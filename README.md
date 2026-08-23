@@ -8,6 +8,7 @@ Git.
 cargo run -p tfm -- init --locale uk --locale pl ./example
 cargo run -p tfm -- check ./example
 cargo run -p tfm -- translate-plan --locale uk ./example
+cargo run -p tfm -- apply-translations --response translations.json ./example
 ```
 
 `tfm init` produces:
@@ -24,6 +25,12 @@ There is intentionally no `locales/en.yml`.
 `tfm translate-plan` does not change files. It prints JSON tasks only for
 missing translations, including the source occurrence, prior source text and
 translation (when available), and the Git provenance captured at extraction.
+
+`tfm apply-translations` accepts a versioned JSON response containing
+`source`, `source_hash`, `locale`, and `translation`. It refuses stale source
+text and conflicting existing translations, then writes target catalogs only
+after every response entry validates. A response is not applied partially when
+any entry is invalid.
 
 The language extractors will be separate WASM Components governed by the WIT
 contract in [`wit/tfm-plugin.wit`](wit/tfm-plugin.wit). The Rust host owns files,

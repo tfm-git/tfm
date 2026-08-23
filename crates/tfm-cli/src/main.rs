@@ -49,6 +49,13 @@ enum Command {
         #[arg(default_value = ".")]
         path: PathBuf,
     },
+    /// Apply a validated JSON response to a translation plan.
+    ApplyTranslations {
+        #[arg(long)]
+        response: PathBuf,
+        #[arg(default_value = ".")]
+        path: PathBuf,
+    },
 }
 
 struct PluginState {
@@ -87,6 +94,15 @@ async fn main() -> Result<()> {
         Command::TranslatePlan { locale, path } => {
             let plan = tfm_core::translation_plan(&path, &locale)?;
             println!("{}", serde_json::to_string_pretty(&plan)?);
+        }
+        Command::ApplyTranslations { response, path } => {
+            let response: tfm_core::TranslationResponse =
+                serde_json::from_str(&fs::read_to_string(response)?)?;
+            let report = tfm_core::apply_translation_response(&path, &response)?;
+            println!(
+                "applied {} translations, {} already applied",
+                report.applied, report.already_applied
+            );
         }
     }
     Ok(())
