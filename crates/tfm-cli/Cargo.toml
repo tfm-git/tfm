@@ -14,3 +14,6 @@ path = "src/main.rs"
 anyhow.workspace = true
 clap.workspace = true
 tfm-core = { path = "../tfm-core" }
+tokio.workspace = true
+wasmtime.workspace = true
+wasmtime-wasi.workspace = true

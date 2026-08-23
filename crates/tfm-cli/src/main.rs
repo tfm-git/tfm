@@ -1,7 +1,17 @@
-use std::path::PathBuf;
+use std::{fs, path::PathBuf};
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
+use wasmtime::{
+    Config, Engine, Store,
+    component::{Component, Linker},
+};
+use wasmtime_wasi::{ResourceTable, WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
+
+wasmtime::component::bindgen!({
+    path: "../../wit",
+    world: "analyzer",
+});
 
 #[derive(Debug, Parser)]
 #[command(version, about = "Git-native AI localization tooling")]
@@ -24,9 +34,30 @@ enum Command {
         #[arg(default_value = ".")]
         path: PathBuf,
     },
+    /// Run a WASM analyzer plugin against one source file without changing files.
+    Extract {
+        #[arg(long)]
+        plugin: PathBuf,
+        source: PathBuf,
+    },
 }
 
-fn main() -> Result<()> {
+struct PluginState {
+    ctx: WasiCtx,
+    table: ResourceTable,
+}
+
+impl WasiView for PluginState {
+    fn ctx(&mut self) -> WasiCtxView<'_> {
+        WasiCtxView {
+            ctx: &mut self.ctx,
+            table: &mut self.table,
+        }
+    }
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
     match Cli::parse().command {
         Command::Init { locale, path } => {
             tfm_core::init_project(&path, &locale)?;
@@ -39,6 +70,42 @@ fn main() -> Result<()> {
                 report.message_count, report.catalog_count
             );
         }
+        Command::Extract { plugin, source } => run_plugin(&plugin, &source).await?,
+    }
+    Ok(())
+}
+
+async fn run_plugin(plugin_path: &PathBuf, source_path: &PathBuf) -> Result<()> {
+    let source = fs::read_to_string(source_path)?;
+    let mut config = Config::new();
+    config.wasm_component_model(true);
+    let engine = Engine::new(&config)?;
+    let component = Component::from_file(&engine, plugin_path)?;
+    let mut linker = Linker::new(&engine);
+    wasmtime_wasi::p2::add_to_linker_async(&mut linker)?;
+    wasmtime_wasi::p3::add_to_linker(&mut linker)?;
+    let mut store = Store::new(
+        &engine,
+        PluginState {
+            ctx: WasiCtxBuilder::new().build(),
+            table: ResourceTable::new(),
+        },
+    );
+    let bindings = Analyzer::instantiate_async(&mut store, &component, &linker).await?;
+    let document = tfm::plugin::types::Document {
+        path: source_path.display().to_string(),
+        language: "rust".into(),
+        text: source,
+    };
+    let analysis = store
+        .run_concurrent(async move |accessor| bindings.call_analyze(accessor, document).await)
+        .await??
+        .map_err(anyhow::Error::msg)?;
+    for message in analysis.messages {
+        println!("{}", message.source);
+    }
+    for diagnostic in analysis.diagnostics {
+        eprintln!("plugin: {}", diagnostic.message);
     }
     Ok(())
 }
