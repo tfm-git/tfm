@@ -4,6 +4,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
     path::{Path, PathBuf},
+    process::Command,
 };
 
 use anyhow::{Context, Result, bail};
@@ -38,6 +39,15 @@ pub struct Message {
     pub occurrences: Vec<Occurrence>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub history: Vec<PreviousSource>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed_at: Option<GitProvenance>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GitProvenance {
+    pub revision: String,
+    pub dirty: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -46,6 +56,8 @@ pub struct PreviousSource {
     pub source: String,
     pub source_hash: String,
     pub translations: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed_at: Option<GitProvenance>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -166,6 +178,7 @@ pub fn apply_extraction(
 ) -> Result<ExtractionReport> {
     let config: Config = read_yaml(&root.join(CONFIG_PATH))?;
     let mut state: State = read_yaml(&root.join(STATE_PATH))?;
+    let observed_at = git_provenance(root);
     let mut catalogs: BTreeMap<String, Catalog> = BTreeMap::new();
     for locale in &config.required_locales {
         catalogs.insert(locale.clone(), read_yaml(&catalog_path(root, locale))?);
@@ -230,6 +243,10 @@ pub fn apply_extraction(
                         source: previous_source.clone(),
                         source_hash: hex_sha256(previous_source),
                         translations,
+                        observed_at: state
+                            .messages
+                            .get(previous_source)
+                            .and_then(|message| message.observed_at.clone()),
                     });
                 }
             }
@@ -244,6 +261,7 @@ pub fn apply_extraction(
                 source_hash,
                 occurrences: message.occurrences,
                 history,
+                observed_at: observed_at.clone(),
             },
         );
     }
@@ -267,6 +285,23 @@ pub fn apply_extraction(
 
 fn hex_sha256(source: &str) -> String {
     format!("{:x}", Sha256::digest(source.as_bytes()))
+}
+
+fn git_provenance(root: &Path) -> Option<GitProvenance> {
+    let revision = Command::new("git")
+        .args(["-C", root.to_str()?, "rev-parse", "HEAD"])
+        .output()
+        .ok()?;
+    if !revision.status.success() {
+        return None;
+    }
+    let revision = String::from_utf8(revision.stdout).ok()?.trim().to_owned();
+    let dirty = Command::new("git")
+        .args(["-C", root.to_str()?, "status", "--porcelain"])
+        .output()
+        .ok()
+        .is_some_and(|output| !output.stdout.is_empty());
+    Some(GitProvenance { revision, dirty })
 }
 
 fn validate_requested_locales(locales: &[String]) -> Result<()> {
