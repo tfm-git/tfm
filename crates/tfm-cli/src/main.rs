@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     fs,
     path::{Path, PathBuf},
     process::Stdio,
@@ -62,6 +63,14 @@ enum Command {
         #[arg(default_value = ".")]
         path: PathBuf,
     },
+    /// Apply a narrowly scoped source transformation.
+    Fix {
+        /// Wrap implicit Rust UI strings in t!(...) markers.
+        #[arg(long)]
+        mark: bool,
+        #[arg(default_value = ".")]
+        path: PathBuf,
+    },
     /// Print a read-only JSON plan for translations that are still missing.
     TranslatePlan {
         #[arg(long, value_name = "BCP47")]
@@ -117,6 +126,13 @@ async fn main() -> Result<()> {
                 serde_json::to_string_pretty(&tfm_core::implicit_candidates(&path)?)?
             );
         }
+        Command::Fix { mark, path } => {
+            if !mark {
+                bail!("choose a fix mode, for example `tfm fix --mark`");
+            }
+            let changed = mark_implicit_candidates(&path)?;
+            println!("marked {changed} implicit UI strings");
+        }
         Command::TranslatePlan { locale, path } => {
             let plan = tfm_core::translation_plan(&path, &locale)?;
             println!("{}", serde_json::to_string_pretty(&plan)?);
@@ -132,6 +148,118 @@ async fn main() -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn mark_implicit_candidates(root: &Path) -> Result<usize> {
+    let root = root.canonicalize()?;
+    let mut by_path: BTreeMap<PathBuf, Vec<tfm_core::ImplicitCandidate>> = BTreeMap::new();
+    for candidate in tfm_core::implicit_candidates(&root)? {
+        let path = candidate.occurrence.path.canonicalize().with_context(|| {
+            format!(
+                "resolve implicit candidate path {}",
+                candidate.occurrence.path.display()
+            )
+        })?;
+        if !path.starts_with(&root) {
+            bail!(
+                "refusing to mark {} because it is outside project root {}",
+                path.display(),
+                root.display()
+            );
+        }
+        by_path.entry(path).or_default().push(candidate);
+    }
+
+    let mut changed = 0;
+    for (path, occurrences) in by_path {
+        let source = fs::read_to_string(&path)?;
+        let (updated, count) = mark_source_literals(&source, &occurrences)?;
+        if count > 0 {
+            fs::write(&path, updated)?;
+            changed += count;
+        }
+    }
+    Ok(changed)
+}
+
+fn mark_source_literals(
+    source: &str,
+    candidates: &[tfm_core::ImplicitCandidate],
+) -> Result<(String, usize)> {
+    let mut edits = candidates
+        .iter()
+        .map(|candidate| {
+            let start = offset_for_position(
+                source,
+                candidate.occurrence.line,
+                candidate.occurrence.column,
+            )?;
+            Ok((start, candidate))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    // Implicit Rust anchors identify a literal span, but the core occurrence only
+    // persists its start position. Resolve the token conservatively from there.
+    edits.sort_by_key(|(start, _)| std::cmp::Reverse(*start));
+    let mut updated = source.to_owned();
+    let mut changed = 0;
+    let mut previously_marked = None;
+    for (start, candidate) in edits {
+        if previously_marked == Some(start) {
+            continue;
+        }
+        let end = rust_string_literal_end(&updated[start..]).with_context(|| {
+            format!(
+                "expected a plain Rust string literal at {}:{}",
+                candidate.occurrence.line, candidate.occurrence.column
+            )
+        })? + start;
+        let literal = &updated[start..end];
+        let current_source = syn::parse_str::<syn::LitStr>(literal)
+            .context("implicit candidate no longer points at a valid Rust string literal")?
+            .value();
+        if current_source != candidate.source {
+            bail!(
+                "implicit candidate at {}:{} changed since extraction; run `tfm extract` and review again",
+                candidate.occurrence.line,
+                candidate.occurrence.column
+            );
+        }
+        updated.replace_range(start..end, &format!("t!({literal})"));
+        changed += 1;
+        previously_marked = Some(start);
+    }
+    Ok((updated, changed))
+}
+
+fn offset_for_position(source: &str, line: u32, column: u32) -> Result<usize> {
+    let line_start = source
+        .split_inclusive('\n')
+        .take(line.saturating_sub(1) as usize)
+        .map(str::len)
+        .sum::<usize>();
+    let offset = line_start + column as usize;
+    if offset > source.len() || !source.is_char_boundary(offset) {
+        bail!("invalid source position {line}:{column}");
+    }
+    Ok(offset)
+}
+
+fn rust_string_literal_end(source: &str) -> Option<usize> {
+    let bytes = source.as_bytes();
+    if bytes.first() != Some(&b'"') {
+        return None;
+    }
+    let mut escaped = false;
+    for (index, byte) in bytes.iter().enumerate().skip(1) {
+        if *byte == b'"' && !escaped {
+            return Some(index + 1);
+        }
+        escaped = *byte == b'\\' && !escaped;
+        if *byte != b'\\' {
+            escaped = false;
+        }
+    }
+    None
 }
 
 #[derive(Debug, Serialize)]
@@ -574,8 +702,23 @@ fn language_for_path(path: &Path) -> Result<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::language_for_path;
-    use std::path::Path;
+    use super::{language_for_path, mark_source_literals};
+    use std::path::{Path, PathBuf};
+    use tfm_core::{ImplicitCandidate, Occurrence};
+
+    fn implicit_candidate(source: &str, column: u32) -> ImplicitCandidate {
+        ImplicitCandidate {
+            source: source.into(),
+            occurrence: Occurrence {
+                path: PathBuf::from("src/view.rs"),
+                line: 1,
+                column,
+                symbol: None,
+                anchor: Some("implicit::gpui".into()),
+                context_hints: Vec::new(),
+            },
+        }
+    }
 
     #[test]
     fn infers_plugin_languages_from_source_extensions() {
@@ -589,5 +732,55 @@ mod tests {
             "typescript"
         );
         assert_eq!(language_for_path(Path::new("view.tsx")).unwrap(), "tsx");
+    }
+
+    #[test]
+    fn marks_each_plain_string_literal_once() {
+        let source = "fn view() { ui.child(\"Settings\").label(\"Save\"); }\n";
+        let settings = source.find("\"Settings\"").unwrap() as u32;
+        let save = source.find("\"Save\"").unwrap() as u32;
+        let (updated, changed) = mark_source_literals(
+            source,
+            &[
+                implicit_candidate("Settings", settings),
+                implicit_candidate("Save", save),
+                implicit_candidate("Settings", settings),
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(changed, 2);
+        assert_eq!(
+            updated,
+            "fn view() { ui.child(t!(\"Settings\")).label(t!(\"Save\")); }\n"
+        );
+    }
+
+    #[test]
+    fn preserves_escaped_quotes_in_a_string_literal() {
+        let source = "let label = \"Say \\\"hello\\\"\";\n";
+        let (updated, changed) = mark_source_literals(
+            source,
+            &[implicit_candidate(
+                "Say \"hello\"",
+                source.find('"').unwrap() as u32,
+            )],
+        )
+        .unwrap();
+
+        assert_eq!(changed, 1);
+        assert_eq!(updated, "let label = t!(\"Say \\\"hello\\\"\");\n");
+    }
+
+    #[test]
+    fn refuses_a_literal_changed_since_extraction() {
+        let source = "let label = \"Cancel\";\n";
+        let error = mark_source_literals(
+            source,
+            &[implicit_candidate("Save", source.find('"').unwrap() as u32)],
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("changed since extraction"));
     }
 }

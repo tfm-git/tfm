@@ -15,6 +15,7 @@ anyhow.workspace = true
 clap.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+syn.workspace = true
 tfm-core = { path = "../tfm-core" }
 tokio.workspace = true
 wasmtime.workspace = true
