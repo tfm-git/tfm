@@ -95,6 +95,7 @@ pub struct ExtractionReport {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct TranslationTask {
     pub source: String,
+    pub source_hash: String,
     pub locale: String,
     pub occurrences: Vec<Occurrence>,
     pub history: Vec<PreviousSource>,
@@ -107,6 +108,30 @@ pub struct TranslationTask {
 pub struct TranslationPlan {
     pub version: u32,
     pub tasks: Vec<TranslationTask>,
+}
+
+/// A translation proposed by an external workflow for a task in a translation plan.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TranslationResponseItem {
+    pub source: String,
+    pub source_hash: String,
+    pub locale: String,
+    pub translation: String,
+}
+
+/// A versioned, machine-readable response to a translation plan.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TranslationResponse {
+    pub version: u32,
+    pub translations: Vec<TranslationResponseItem>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApplyTranslationsReport {
+    pub applied: usize,
+    pub already_applied: usize,
 }
 
 pub fn init_project(root: &Path, locales: &[String]) -> Result<()> {
@@ -221,6 +246,7 @@ pub fn translation_plan(root: &Path, requested_locales: &[String]) -> Result<Tra
             {
                 tasks.push(TranslationTask {
                     source: message.source.clone(),
+                    source_hash: message.source_hash.clone(),
                     locale: locale.clone(),
                     occurrences: message.occurrences.clone(),
                     history: message.history.clone(),
@@ -231,6 +257,95 @@ pub fn translation_plan(root: &Path, requested_locales: &[String]) -> Result<Tra
     }
 
     Ok(TranslationPlan { version: 1, tasks })
+}
+
+/// Validate an entire translation response before writing changed target catalogs.
+pub fn apply_translation_response(
+    root: &Path,
+    response: &TranslationResponse,
+) -> Result<ApplyTranslationsReport> {
+    if response.version != 1 {
+        bail!(
+            "unsupported translation response version {}",
+            response.version
+        );
+    }
+
+    let config: Config = read_yaml(&root.join(CONFIG_PATH))?;
+    let state: State = read_yaml(&root.join(STATE_PATH))?;
+    let mut catalogs: BTreeMap<String, Catalog> = BTreeMap::new();
+    for locale in &config.required_locales {
+        catalogs.insert(locale.clone(), read_yaml(&catalog_path(root, locale))?);
+    }
+
+    let mut seen = BTreeSet::new();
+    let mut changed_locales = BTreeSet::new();
+    let mut applied = 0;
+    let mut already_applied = 0;
+    for item in &response.translations {
+        if item.translation.trim().is_empty() {
+            bail!(
+                "translation for `{}` ({}) must not be empty",
+                item.source,
+                item.locale
+            );
+        }
+        if !config.required_locales.contains(&item.locale) {
+            bail!(
+                "locale `{}` is not configured for this project",
+                item.locale
+            );
+        }
+        if !seen.insert((&item.locale, &item.source)) {
+            bail!(
+                "translation response has a duplicate entry for `{}` ({})",
+                item.source,
+                item.locale
+            );
+        }
+        let message = state
+            .messages
+            .get(&item.source)
+            .with_context(|| format!("source `{}` is no longer extracted", item.source))?;
+        if message.source_hash != item.source_hash || hex_sha256(&item.source) != item.source_hash {
+            bail!(
+                "source `{}` changed since this translation response was created; request a new plan",
+                item.source
+            );
+        }
+        let catalog = catalogs
+            .get_mut(&item.locale)
+            .expect("configured catalogs are loaded");
+        match catalog.get(&item.source) {
+            Some(existing) if existing == &item.translation => already_applied += 1,
+            Some(existing) if !existing.trim().is_empty() => bail!(
+                "translation for `{}` ({}) already differs; refusing to overwrite it",
+                item.source,
+                item.locale
+            ),
+            Some(_) => {
+                catalog.insert(item.source.clone(), item.translation.clone());
+                changed_locales.insert(item.locale.clone());
+                applied += 1;
+            }
+            None => bail!(
+                "locales/{}.yml is missing source `{}`; run extraction before applying translations",
+                item.locale,
+                item.source
+            ),
+        }
+    }
+
+    for locale in changed_locales {
+        let catalog = catalogs
+            .get(&locale)
+            .expect("changed locale is one of the loaded catalogs");
+        write_yaml(&catalog_path(root, &locale), catalog)?;
+    }
+    Ok(ApplyTranslationsReport {
+        applied,
+        already_applied,
+    })
 }
 
 /// Persist facts returned by a plugin and add untranslated entries to each target catalog.
@@ -447,7 +562,7 @@ mod tests {
             "Save changes".into(),
             Message {
                 source: "Save changes".into(),
-                source_hash: "current".into(),
+                source_hash: hex_sha256("Save changes"),
                 occurrences: vec![occurrence.clone()],
                 history: vec![PreviousSource {
                     source: "Save".into(),
@@ -468,7 +583,7 @@ mod tests {
             "Cancel".into(),
             Message {
                 source: "Cancel".into(),
-                source_hash: "cancel".into(),
+                source_hash: hex_sha256("Cancel"),
                 occurrences: vec![],
                 history: vec![],
                 observed_at: None,
@@ -488,6 +603,7 @@ mod tests {
         assert_eq!(plan.version, 1);
         assert_eq!(plan.tasks.len(), 1);
         assert_eq!(plan.tasks[0].source, "Save changes");
+        assert_eq!(plan.tasks[0].source_hash, hex_sha256("Save changes"));
         assert_eq!(plan.tasks[0].locale, "uk");
         assert_eq!(plan.tasks[0].occurrences, vec![occurrence]);
         assert_eq!(plan.tasks[0].history[0].source, "Save");
@@ -503,5 +619,81 @@ mod tests {
             fs::read_to_string(catalog_path(root.path(), "uk")).unwrap(),
             catalog_before
         );
+    }
+
+    #[test]
+    fn applies_current_responses_but_rejects_stale_ones_without_writing() {
+        let root = tempfile::tempdir().unwrap();
+        init_project(root.path(), &["uk".into()]).unwrap();
+        let source = "Save changes";
+        let other_source = "Discard";
+        let mut state = State::default();
+        state.version = 1;
+        state.messages.insert(
+            source.into(),
+            Message {
+                source: source.into(),
+                source_hash: hex_sha256(source),
+                occurrences: vec![],
+                history: vec![],
+                observed_at: None,
+            },
+        );
+        state.messages.insert(
+            other_source.into(),
+            Message {
+                source: other_source.into(),
+                source_hash: hex_sha256(other_source),
+                occurrences: vec![],
+                history: vec![],
+                observed_at: None,
+            },
+        );
+        write_yaml(&root.path().join(STATE_PATH), &state).unwrap();
+        let catalog: Catalog = BTreeMap::from([
+            (source.into(), String::new()),
+            (other_source.into(), String::new()),
+        ]);
+        write_yaml(&catalog_path(root.path(), "uk"), &catalog).unwrap();
+
+        let before_stale = fs::read_to_string(catalog_path(root.path(), "uk")).unwrap();
+        let stale = TranslationResponse {
+            version: 1,
+            translations: vec![
+                TranslationResponseItem {
+                    source: source.into(),
+                    source_hash: hex_sha256(source),
+                    locale: "uk".into(),
+                    translation: "Зберегти зміни".into(),
+                },
+                TranslationResponseItem {
+                    source: other_source.into(),
+                    source_hash: hex_sha256("Drop"),
+                    locale: "uk".into(),
+                    translation: "Відкинути".into(),
+                },
+            ],
+        };
+        let error = apply_translation_response(root.path(), &stale).unwrap_err();
+        assert!(error.to_string().contains("changed since"));
+        assert_eq!(
+            fs::read_to_string(catalog_path(root.path(), "uk")).unwrap(),
+            before_stale
+        );
+
+        let response = TranslationResponse {
+            version: 1,
+            translations: vec![TranslationResponseItem {
+                source: source.into(),
+                source_hash: hex_sha256(source),
+                locale: "uk".into(),
+                translation: "Зберегти зміни".into(),
+            }],
+        };
+        let report = apply_translation_response(root.path(), &response).unwrap();
+        assert_eq!(report.applied, 1);
+        assert_eq!(report.already_applied, 0);
+        let saved: Catalog = read_yaml(&catalog_path(root.path(), "uk")).unwrap();
+        assert_eq!(saved.get(source), Some(&"Зберегти зміни".into()));
     }
 }
