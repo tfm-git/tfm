@@ -60,4 +60,5 @@ task in the plan):
 
 The language extractors will be separate WASM Components governed by the WIT
 contract in [`wit/tfm-plugin.wit`](wit/tfm-plugin.wit). The Rust host owns files,
-Git, LSP and LLM calls; plugins receive documents and return analysis facts.
+Git, LSP and LLM calls; plugins receive documents, return analysis facts, and may
+attach read-only semantic context hints for the host to resolve through LSP.

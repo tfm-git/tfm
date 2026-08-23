@@ -70,6 +70,36 @@ pub struct Occurrence {
     pub symbol: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub anchor: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub context_hints: Vec<ContextHint>,
+}
+
+/// A language-plugin request for read-only semantic context from the host.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContextHint {
+    pub kind: ContextKind,
+    pub range: Range,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextKind {
+    Hover,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Range {
+    pub start: Position,
+    pub end: Position,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Position {
+    pub line: u32,
+    pub column: u32,
 }
 
 pub type Catalog = BTreeMap<String, String>;
@@ -582,6 +612,19 @@ mod tests {
             column: 5,
             symbol: Some("save".into()),
             anchor: Some("save::t!#1".into()),
+            context_hints: vec![ContextHint {
+                kind: ContextKind::Hover,
+                range: Range {
+                    start: Position {
+                        line: 12,
+                        column: 7,
+                    },
+                    end: Position {
+                        line: 12,
+                        column: 11,
+                    },
+                },
+            }],
         };
         let mut state = State::default();
         state.version = 1;
