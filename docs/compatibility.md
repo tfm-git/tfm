@@ -12,7 +12,10 @@ stable.
 | wit-bindgen | 0.60.0 |
 | wasm-tools | 1.257.1 |
 | Plugin ABI | `tfm:plugin@0.1.0` |
+| Plugin toolchain | `nightly-2026-08-23` (`rustc 1.100.0-nightly`) |
+| Plugin target | `wasm32-wasip2` |
 
-The exact WASI Preview 3 WIT snapshot, plugin nightly date, and component build
-target are deliberately not locked until a compatibility spike proves that a
-plugin built with the tuple runs in Wasmtime 48 on macOS and Linux.
+The compatibility spike on macOS built an async Rust analyzer plugin with this
+toolchain and ran its `manifest` export in a Wasmtime 48 host. The host enabled
+the component model and links both `wasmtime-wasi` P2 (guest target support) and
+P3. A Linux run is still required before declaring the tuple cross-platform.

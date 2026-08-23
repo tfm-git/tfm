@@ -51,6 +51,6 @@ interface types {
 world analyzer {
   use types.{analysis, document, manifest};
 
-  export manifest: func() -> manifest;
-  export analyze: func(document: document) -> result<analysis, string>;
+  export manifest: async func() -> manifest;
+  export analyze: async func(document: document) -> result<analysis, string>;
 }
