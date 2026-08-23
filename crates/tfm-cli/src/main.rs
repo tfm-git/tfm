@@ -120,12 +120,16 @@ async fn run_plugin(plugin_path: &PathBuf, root: &PathBuf, source_path: &PathBuf
                     line: occurrence.range.start.line,
                     column: occurrence.range.start.column,
                     symbol: occurrence.symbol,
+                    anchor: Some(occurrence.anchor),
                 })
                 .collect(),
         })
         .collect();
-    let added = tfm_core::apply_extraction(root, extracted)?;
-    println!("extracted {added} new messages");
+    let report = tfm_core::apply_extraction(root, source_path, extracted)?;
+    println!(
+        "extracted {} new messages, removed {} stale messages",
+        report.added, report.removed
+    );
     for diagnostic in analysis.diagnostics {
         eprintln!("plugin: {}", diagnostic.message);
     }

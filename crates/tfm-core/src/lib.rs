@@ -46,6 +46,8 @@ pub struct Occurrence {
     pub column: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub symbol: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anchor: Option<String>,
 }
 
 pub type Catalog = BTreeMap<String, String>;
@@ -60,6 +62,12 @@ pub struct CheckReport {
 pub struct ExtractedMessage {
     pub source: String,
     pub occurrences: Vec<Occurrence>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExtractionReport {
+    pub added: usize,
+    pub removed: usize,
 }
 
 pub fn init_project(root: &Path, locales: &[String]) -> Result<()> {
@@ -141,9 +149,28 @@ pub fn check_project(root: &Path) -> Result<CheckReport> {
 }
 
 /// Persist facts returned by a plugin and add untranslated entries to each target catalog.
-pub fn apply_extraction(root: &Path, extracted: Vec<ExtractedMessage>) -> Result<usize> {
+pub fn apply_extraction(
+    root: &Path,
+    scanned_path: &Path,
+    extracted: Vec<ExtractedMessage>,
+) -> Result<ExtractionReport> {
     let config: Config = read_yaml(&root.join(CONFIG_PATH))?;
     let mut state: State = read_yaml(&root.join(STATE_PATH))?;
+    let scanned_paths = BTreeSet::from([scanned_path.to_path_buf()]);
+    for message in state.messages.values_mut() {
+        message
+            .occurrences
+            .retain(|occurrence| !scanned_paths.contains(&occurrence.path));
+    }
+    let stale: Vec<_> = state
+        .messages
+        .iter()
+        .filter(|(_, message)| message.occurrences.is_empty())
+        .map(|(source, _)| source.clone())
+        .collect();
+    for source in &stale {
+        state.messages.remove(source);
+    }
     let mut added = 0;
     for message in extracted {
         let source_hash = hex_sha256(&message.source);
@@ -163,12 +190,18 @@ pub fn apply_extraction(root: &Path, extracted: Vec<ExtractedMessage>) -> Result
     for locale in &config.required_locales {
         let path = catalog_path(root, locale);
         let mut catalog: Catalog = read_yaml(&path)?;
+        for source in &stale {
+            catalog.remove(source);
+        }
         for source in state.messages.keys() {
             catalog.entry(source.clone()).or_default();
         }
         write_yaml(&path, &catalog)?;
     }
-    Ok(added)
+    Ok(ExtractionReport {
+        added,
+        removed: stale.len(),
+    })
 }
 
 fn hex_sha256(source: &str) -> String {
