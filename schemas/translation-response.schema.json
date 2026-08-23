@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:tfm:translation-response:1",
+  "title": "TFM Translation Response",
+  "description": "Versioned response accepted by tfm apply-translations.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "translations"],
+  "properties": {
+    "version": {
+      "const": 1
+    },
+    "translations": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["source", "source_hash", "locale", "translation"],
+        "properties": {
+          "source": {
+            "type": "string",
+            "minLength": 1
+          },
+          "source_hash": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "locale": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*$"
+          },
+          "translation": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": ".*\\S.*"
+          }
+        }
+      }
+    }
+  }
+}

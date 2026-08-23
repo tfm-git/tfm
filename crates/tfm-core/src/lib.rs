@@ -107,6 +107,8 @@ pub struct TranslationTask {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct TranslationPlan {
     pub version: u32,
+    /// The exact JSON Schema an external translator must use for its response.
+    pub response_schema: serde_json::Value,
     pub tasks: Vec<TranslationTask>,
 }
 
@@ -132,6 +134,17 @@ pub struct TranslationResponse {
 pub struct ApplyTranslationsReport {
     pub applied: usize,
     pub already_applied: usize,
+}
+
+/// Return the versioned contract for [`TranslationResponse`].
+///
+/// This is embedded in each translation plan so an LLM or editor integration
+/// can validate its response without knowing TFM's Rust types.
+pub fn translation_response_schema() -> serde_json::Value {
+    serde_json::from_str(include_str!(
+        "../../../schemas/translation-response.schema.json"
+    ))
+    .expect("the bundled translation response schema must be valid JSON")
 }
 
 pub fn init_project(root: &Path, locales: &[String]) -> Result<()> {
@@ -256,7 +269,11 @@ pub fn translation_plan(root: &Path, requested_locales: &[String]) -> Result<Tra
         }
     }
 
-    Ok(TranslationPlan { version: 1, tasks })
+    Ok(TranslationPlan {
+        version: 1,
+        response_schema: translation_response_schema(),
+        tasks,
+    })
 }
 
 /// Validate an entire translation response before writing changed target catalogs.
@@ -601,6 +618,11 @@ mod tests {
         let plan = translation_plan(root.path(), &["uk".into()]).unwrap();
 
         assert_eq!(plan.version, 1);
+        assert_eq!(
+            plan.response_schema["$id"],
+            "urn:tfm:translation-response:1"
+        );
+        assert_eq!(plan.response_schema["properties"]["version"]["const"], 1);
         assert_eq!(plan.tasks.len(), 1);
         assert_eq!(plan.tasks[0].source, "Save changes");
         assert_eq!(plan.tasks[0].source_hash, hex_sha256("Save changes"));
