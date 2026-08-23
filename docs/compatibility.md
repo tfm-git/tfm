@@ -11,7 +11,7 @@ stable.
 | Wasmtime / wasmtime-wasi | 48.0.0 |
 | wit-bindgen | 0.60.0 |
 | wasm-tools | 1.257.1 |
-| Plugin ABI | `tfm:plugin@0.1.0` |
+| Plugin ABI | `tfm:plugin@0.2.0` |
 | Plugin toolchain | `nightly-2026-08-23` (`rustc 1.100.0-nightly`) |
 | Plugin target | `wasm32-wasip2` |
 

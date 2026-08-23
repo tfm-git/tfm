@@ -120,6 +120,7 @@ async fn run_plugin(plugin_path: &PathBuf, root: &PathBuf, source_path: &PathBuf
                     line: occurrence.range.start.line,
                     column: occurrence.range.start.column,
                     symbol: occurrence.symbol,
+                    anchor: Some(occurrence.anchor),
                 })
                 .collect(),
         })
