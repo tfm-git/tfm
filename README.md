@@ -25,12 +25,32 @@ There is intentionally no `locales/en.yml`.
 `tfm translate-plan` does not change files. It prints JSON tasks only for
 missing translations, including the source occurrence, prior source text and
 translation (when available), and the Git provenance captured at extraction.
+Each plan also embeds the exact versioned JSON Schema expected by
+`apply-translations`; the same contract is checked into
+[`schemas/translation-response.schema.json`](schemas/translation-response.schema.json).
 
 `tfm apply-translations` accepts a versioned JSON response containing
 `source`, `source_hash`, `locale`, and `translation`. It refuses stale source
 text and conflicting existing translations, then writes target catalogs only
 after every response entry validates. A response is not applied partially when
 any entry is invalid.
+
+For example, an LLM response has this shape (the source hash comes from its
+task in the plan):
+
+```json
+{
+  "version": 1,
+  "translations": [
+    {
+      "source": "Save changes",
+      "source_hash": "<hash from the plan>",
+      "locale": "uk",
+      "translation": "Зберегти зміни"
+    }
+  ]
+}
+```
 
 The language extractors will be separate WASM Components governed by the WIT
 contract in [`wit/tfm-plugin.wit`](wit/tfm-plugin.wit). The Rust host owns files,
