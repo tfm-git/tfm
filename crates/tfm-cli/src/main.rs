@@ -34,10 +34,12 @@ enum Command {
         #[arg(default_value = ".")]
         path: PathBuf,
     },
-    /// Run a WASM analyzer plugin against one source file without changing files.
+    /// Run a WASM analyzer and update project state plus target catalogs.
     Extract {
         #[arg(long)]
         plugin: PathBuf,
+        #[arg(long, default_value = ".")]
+        path: PathBuf,
         source: PathBuf,
     },
 }
@@ -70,12 +72,16 @@ async fn main() -> Result<()> {
                 report.message_count, report.catalog_count
             );
         }
-        Command::Extract { plugin, source } => run_plugin(&plugin, &source).await?,
+        Command::Extract {
+            plugin,
+            path,
+            source,
+        } => run_plugin(&plugin, &path, &source).await?,
     }
     Ok(())
 }
 
-async fn run_plugin(plugin_path: &PathBuf, source_path: &PathBuf) -> Result<()> {
+async fn run_plugin(plugin_path: &PathBuf, root: &PathBuf, source_path: &PathBuf) -> Result<()> {
     let source = fs::read_to_string(source_path)?;
     let mut config = Config::new();
     config.wasm_component_model(true);
@@ -101,9 +107,25 @@ async fn run_plugin(plugin_path: &PathBuf, source_path: &PathBuf) -> Result<()> 
         .run_concurrent(async move |accessor| bindings.call_analyze(accessor, document).await)
         .await??
         .map_err(anyhow::Error::msg)?;
-    for message in analysis.messages {
-        println!("{}", message.source);
-    }
+    let extracted = analysis
+        .messages
+        .into_iter()
+        .map(|message| tfm_core::ExtractedMessage {
+            source: message.source,
+            occurrences: message
+                .occurrences
+                .into_iter()
+                .map(|occurrence| tfm_core::Occurrence {
+                    path: source_path.clone(),
+                    line: occurrence.range.start.line,
+                    column: occurrence.range.start.column,
+                    symbol: occurrence.symbol,
+                })
+                .collect(),
+        })
+        .collect();
+    let added = tfm_core::apply_extraction(root, extracted)?;
+    println!("extracted {added} new messages");
     for diagnostic in analysis.diagnostics {
         eprintln!("plugin: {}", diagnostic.message);
     }
