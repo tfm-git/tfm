@@ -250,6 +250,27 @@ async fn run_plugin_at(
                     column: occurrence.range.start.column,
                     symbol: occurrence.symbol,
                     anchor: Some(occurrence.anchor),
+                    context_hints: occurrence
+                        .context_hints
+                        .into_iter()
+                        .map(|hint| tfm_core::ContextHint {
+                            kind: match hint.kind {
+                                tfm::plugin::types::ContextKind::Hover => {
+                                    tfm_core::ContextKind::Hover
+                                }
+                            },
+                            range: tfm_core::Range {
+                                start: tfm_core::Position {
+                                    line: hint.range.start.line,
+                                    column: hint.range.start.column,
+                                },
+                                end: tfm_core::Position {
+                                    line: hint.range.end.line,
+                                    column: hint.range.end.column,
+                                },
+                            },
+                        })
+                        .collect(),
                 })
                 .collect(),
         })
