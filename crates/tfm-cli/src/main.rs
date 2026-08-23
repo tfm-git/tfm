@@ -3,7 +3,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use wasmtime::{
     Config, Engine, Store,
@@ -37,10 +37,8 @@ enum Command {
         #[arg(default_value = ".")]
         path: PathBuf,
     },
-    /// Run a WASM analyzer and update project state plus target catalogs.
+    /// Run the matching local WASM analyzer and update project state plus target catalogs.
     Extract {
-        #[arg(long)]
-        plugin: PathBuf,
         #[arg(long, default_value = ".")]
         path: PathBuf,
         source: PathBuf,
@@ -89,11 +87,7 @@ async fn main() -> Result<()> {
                 report.message_count, report.catalog_count
             );
         }
-        Command::Extract {
-            plugin,
-            path,
-            source,
-        } => run_plugin(&plugin, &path, &source).await?,
+        Command::Extract { path, source } => run_plugin(&path, &source).await?,
         Command::TranslatePlan { locale, path } => {
             let plan = tfm_core::translation_plan(&path, &locale)?;
             println!("{}", serde_json::to_string_pretty(&plan)?);
@@ -111,9 +105,99 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-async fn run_plugin(plugin_path: &PathBuf, root: &PathBuf, source_path: &PathBuf) -> Result<()> {
+async fn run_plugin(root: &PathBuf, source_path: &PathBuf) -> Result<()> {
     let source = fs::read_to_string(source_path)?;
     let language = language_for_path(source_path)?;
+    let plugin_path = discover_plugin(root, &language).await?;
+    run_plugin_at(&plugin_path, root, source_path, source, language).await
+}
+
+async fn discover_plugin(root: &Path, language: &str) -> Result<PathBuf> {
+    let plugin_dir = root.join(tfm_core::PLUGIN_DIR);
+    let paths = local_wasm_plugins(&plugin_dir)?;
+    if paths.is_empty() {
+        bail!(
+            "no local WASM plugins in {}; copy a component there",
+            plugin_dir.display()
+        );
+    }
+
+    let mut matches = Vec::new();
+    for path in paths {
+        let manifest = plugin_manifest(&path)
+            .await
+            .with_context(|| format!("read plugin manifest from {}", path.display()))?;
+        if manifest
+            .languages
+            .iter()
+            .any(|supported| supported == language)
+        {
+            matches.push(path);
+        }
+    }
+    match matches.as_slice() {
+        [path] => Ok(path.clone()),
+        [] => bail!(
+            "no plugin in {} supports `{language}`",
+            plugin_dir.display()
+        ),
+        _ => bail!(
+            "multiple plugins in {} support `{language}`: {}",
+            plugin_dir.display(),
+            matches
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    }
+}
+
+fn local_wasm_plugins(plugin_dir: &Path) -> Result<Vec<PathBuf>> {
+    let mut paths = fs::read_dir(plugin_dir)
+        .with_context(|| format!("read local plugin directory {}", plugin_dir.display()))?
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.is_file()
+                && path
+                    .extension()
+                    .is_some_and(|extension| extension == "wasm")
+        })
+        .collect::<Vec<_>>();
+    paths.sort();
+    Ok(paths)
+}
+
+async fn plugin_manifest(plugin_path: &Path) -> Result<tfm::plugin::types::Manifest> {
+    let mut config = Config::new();
+    config.wasm_component_model(true);
+    let engine = Engine::new(&config)?;
+    let component = Component::from_file(&engine, plugin_path)?;
+    let mut linker = Linker::new(&engine);
+    wasmtime_wasi::p2::add_to_linker_async(&mut linker)?;
+    wasmtime_wasi::p3::add_to_linker(&mut linker)?;
+    let mut store = Store::new(
+        &engine,
+        PluginState {
+            ctx: WasiCtxBuilder::new().build(),
+            table: ResourceTable::new(),
+        },
+    );
+    let bindings = Analyzer::instantiate_async(&mut store, &component, &linker).await?;
+    let manifest = store
+        .run_concurrent(async |accessor| bindings.call_manifest(accessor).await)
+        .await??;
+    Ok(manifest)
+}
+
+async fn run_plugin_at(
+    plugin_path: &Path,
+    root: &Path,
+    source_path: &Path,
+    source: String,
+    language: String,
+) -> Result<()> {
     let mut config = Config::new();
     config.wasm_component_model(true);
     let engine = Engine::new(&config)?;
@@ -161,7 +245,7 @@ async fn run_plugin(plugin_path: &PathBuf, root: &PathBuf, source_path: &PathBuf
                 .occurrences
                 .into_iter()
                 .map(|occurrence| tfm_core::Occurrence {
-                    path: source_path.clone(),
+                    path: source_path.to_path_buf(),
                     line: occurrence.range.start.line,
                     column: occurrence.range.start.column,
                     symbol: occurrence.symbol,

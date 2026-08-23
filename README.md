@@ -7,6 +7,7 @@ Git.
 ```sh
 cargo run -p tfm -- init --locale uk --locale pl ./example
 cargo run -p tfm -- check ./example
+cargo run -p tfm -- extract --path ./example ./example/src/settings.ts
 cargo run -p tfm -- translate-plan --locale uk ./example
 cargo run -p tfm -- apply-translations --response translations.json ./example
 ```
@@ -16,11 +17,16 @@ cargo run -p tfm -- apply-translations --response translations.json ./example
 ```text
 .l10n/config.yml
 .l10n/state.yml
+.l10n/plugins/
 locales/uk.yml
 locales/pl.yml
 ```
 
 There is intentionally no `locales/en.yml`.
+
+Copy each analyzer WASM Component into `.l10n/plugins/`. `tfm extract` reads
+their manifests and selects the one that declares support for the source file's
+language; it fails if none or more than one plugin matches.
 
 `tfm translate-plan` does not change files. It prints JSON tasks only for
 missing translations, including the source occurrence, prior source text and
