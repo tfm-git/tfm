@@ -2625,6 +2625,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "serde_json",
  "tfm-core",
  "tokio",
  "wasmtime",
@@ -2640,6 +2641,7 @@ dependencies = [
  "serde",
  "serde_yaml",
  "sha2",
+ "tempfile",
 ]
 
 [[package]]

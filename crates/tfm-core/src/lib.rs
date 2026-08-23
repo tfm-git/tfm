@@ -91,6 +91,24 @@ pub struct ExtractionReport {
     pub removed: usize,
 }
 
+/// A read-only hand-off item for a translation workflow or an LLM.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct TranslationTask {
+    pub source: String,
+    pub locale: String,
+    pub occurrences: Vec<Occurrence>,
+    pub history: Vec<PreviousSource>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub observed_at: Option<GitProvenance>,
+}
+
+/// A deterministic, file-derived set of missing translations.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct TranslationPlan {
+    pub version: u32,
+    pub tasks: Vec<TranslationTask>,
+}
+
 pub fn init_project(root: &Path, locales: &[String]) -> Result<()> {
     validate_requested_locales(locales)?;
 
@@ -167,6 +185,52 @@ pub fn check_project(root: &Path) -> Result<CheckReport> {
         message_count: state.messages.len(),
         catalog_count: config.required_locales.len(),
     })
+}
+
+/// Return missing translations with source locations and prior phrasing context, without writes.
+pub fn translation_plan(root: &Path, requested_locales: &[String]) -> Result<TranslationPlan> {
+    let config: Config = read_yaml(&root.join(CONFIG_PATH))?;
+    if config.version != 1 {
+        bail!("unsupported config schema version {}", config.version);
+    }
+    validate_requested_locales(&config.required_locales)?;
+
+    let locales = if requested_locales.is_empty() {
+        config.required_locales.clone()
+    } else {
+        requested_locales.to_vec()
+    };
+    for locale in &locales {
+        if !config.required_locales.contains(locale) {
+            bail!("locale `{locale}` is not configured for this project");
+        }
+    }
+
+    let state: State = read_yaml(&root.join(STATE_PATH))?;
+    if state.version != 1 {
+        bail!("unsupported state schema version {}", state.version);
+    }
+
+    let mut tasks = Vec::new();
+    for locale in locales {
+        let catalog: Catalog = read_yaml(&catalog_path(root, &locale))?;
+        for message in state.messages.values() {
+            if catalog
+                .get(&message.source)
+                .is_none_or(|translation| translation.trim().is_empty())
+            {
+                tasks.push(TranslationTask {
+                    source: message.source.clone(),
+                    locale: locale.clone(),
+                    occurrences: message.occurrences.clone(),
+                    history: message.history.clone(),
+                    observed_at: message.observed_at.clone(),
+                });
+            }
+        }
+    }
+
+    Ok(TranslationPlan { version: 1, tasks })
 }
 
 /// Persist facts returned by a plugin and add untranslated entries to each target catalog.
@@ -362,6 +426,82 @@ mod tests {
                 .revision
                 .chars()
                 .all(|character| character.is_ascii_hexdigit())
+        );
+    }
+
+    #[test]
+    fn translation_plan_only_returns_missing_entries_with_history() {
+        let root = tempfile::tempdir().unwrap();
+        init_project(root.path(), &["uk".into()]).unwrap();
+
+        let occurrence = Occurrence {
+            path: PathBuf::from("src/settings.rs"),
+            line: 12,
+            column: 5,
+            symbol: Some("save".into()),
+            anchor: Some("save::t!#1".into()),
+        };
+        let mut state = State::default();
+        state.version = 1;
+        state.messages.insert(
+            "Save changes".into(),
+            Message {
+                source: "Save changes".into(),
+                source_hash: "current".into(),
+                occurrences: vec![occurrence.clone()],
+                history: vec![PreviousSource {
+                    source: "Save".into(),
+                    source_hash: "previous".into(),
+                    translations: BTreeMap::from([("uk".into(), "Зберегти".into())]),
+                    observed_at: Some(GitProvenance {
+                        revision: "a".repeat(40),
+                        dirty: false,
+                    }),
+                }],
+                observed_at: Some(GitProvenance {
+                    revision: "b".repeat(40),
+                    dirty: true,
+                }),
+            },
+        );
+        state.messages.insert(
+            "Cancel".into(),
+            Message {
+                source: "Cancel".into(),
+                source_hash: "cancel".into(),
+                occurrences: vec![],
+                history: vec![],
+                observed_at: None,
+            },
+        );
+        write_yaml(&root.path().join(STATE_PATH), &state).unwrap();
+        let catalog: Catalog = BTreeMap::from([
+            ("Save changes".into(), String::new()),
+            ("Cancel".into(), "Скасувати".into()),
+        ]);
+        write_yaml(&catalog_path(root.path(), "uk"), &catalog).unwrap();
+        let state_before = fs::read_to_string(root.path().join(STATE_PATH)).unwrap();
+        let catalog_before = fs::read_to_string(catalog_path(root.path(), "uk")).unwrap();
+
+        let plan = translation_plan(root.path(), &["uk".into()]).unwrap();
+
+        assert_eq!(plan.version, 1);
+        assert_eq!(plan.tasks.len(), 1);
+        assert_eq!(plan.tasks[0].source, "Save changes");
+        assert_eq!(plan.tasks[0].locale, "uk");
+        assert_eq!(plan.tasks[0].occurrences, vec![occurrence]);
+        assert_eq!(plan.tasks[0].history[0].source, "Save");
+        assert_eq!(
+            plan.tasks[0].history[0].translations.get("uk"),
+            Some(&"Зберегти".into())
+        );
+        assert_eq!(
+            fs::read_to_string(root.path().join(STATE_PATH)).unwrap(),
+            state_before
+        );
+        assert_eq!(
+            fs::read_to_string(catalog_path(root.path(), "uk")).unwrap(),
+            catalog_before
         );
     }
 }

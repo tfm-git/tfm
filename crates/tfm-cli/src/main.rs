@@ -42,6 +42,13 @@ enum Command {
         path: PathBuf,
         source: PathBuf,
     },
+    /// Print a read-only JSON plan for translations that are still missing.
+    TranslatePlan {
+        #[arg(long, value_name = "BCP47")]
+        locale: Vec<String>,
+        #[arg(default_value = ".")]
+        path: PathBuf,
+    },
 }
 
 struct PluginState {
@@ -77,6 +84,10 @@ async fn main() -> Result<()> {
             path,
             source,
         } => run_plugin(&plugin, &path, &source).await?,
+        Command::TranslatePlan { locale, path } => {
+            let plan = tfm_core::translation_plan(&path, &locale)?;
+            println!("{}", serde_json::to_string_pretty(&plan)?);
+        }
     }
     Ok(())
 }
