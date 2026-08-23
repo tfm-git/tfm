@@ -1,6 +1,9 @@
-use std::{fs, path::PathBuf};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 use clap::{Parser, Subcommand};
 use wasmtime::{
     Config, Engine, Store,
@@ -110,6 +113,7 @@ async fn main() -> Result<()> {
 
 async fn run_plugin(plugin_path: &PathBuf, root: &PathBuf, source_path: &PathBuf) -> Result<()> {
     let source = fs::read_to_string(source_path)?;
+    let language = language_for_path(source_path)?;
     let mut config = Config::new();
     config.wasm_component_model(true);
     let engine = Engine::new(&config)?;
@@ -125,9 +129,23 @@ async fn run_plugin(plugin_path: &PathBuf, root: &PathBuf, source_path: &PathBuf
         },
     );
     let bindings = Analyzer::instantiate_async(&mut store, &component, &linker).await?;
+    let manifest = store
+        .run_concurrent(async |accessor| bindings.call_manifest(accessor).await)
+        .await??;
+    if !manifest
+        .languages
+        .iter()
+        .any(|supported| supported == &language)
+    {
+        bail!(
+            "plugin {} does not support `{language}`; it declares: {}",
+            manifest.name,
+            manifest.languages.join(", ")
+        );
+    }
     let document = tfm::plugin::types::Document {
         path: source_path.display().to_string(),
-        language: "rust".into(),
+        language,
         text: source,
     };
     let analysis = store
@@ -161,4 +179,37 @@ async fn run_plugin(plugin_path: &PathBuf, root: &PathBuf, source_path: &PathBuf
         eprintln!("plugin: {}", diagnostic.message);
     }
     Ok(())
+}
+
+fn language_for_path(path: &Path) -> Result<String> {
+    match path.extension().and_then(|extension| extension.to_str()) {
+        Some("rs") => Ok("rust".into()),
+        Some("js" | "jsx") => Ok("javascript".into()),
+        Some("ts") => Ok("typescript".into()),
+        Some("tsx") => Ok("tsx".into()),
+        _ => bail!(
+            "cannot infer a TFM language from {}; use a supported source extension",
+            path.display()
+        ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::language_for_path;
+    use std::path::Path;
+
+    #[test]
+    fn infers_plugin_languages_from_source_extensions() {
+        assert_eq!(language_for_path(Path::new("lib.rs")).unwrap(), "rust");
+        assert_eq!(
+            language_for_path(Path::new("view.jsx")).unwrap(),
+            "javascript"
+        );
+        assert_eq!(
+            language_for_path(Path::new("view.ts")).unwrap(),
+            "typescript"
+        );
+        assert_eq!(language_for_path(Path::new("view.tsx")).unwrap(), "tsx");
+    }
 }
