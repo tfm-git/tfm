@@ -1,0 +1,26 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  core:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Install wasm-tools
+        run: cargo install wasm-tools --version 1.257.1 --locked
+      - name: Check formatting
+        run: cargo fmt --check
+      - name: Test core
+        run: cargo test
+      - name: Validate plugin WIT
+        run: wasm-tools component wit wit/tfm-plugin.wit > /dev/null
