@@ -38,6 +38,15 @@ pub struct Message {
     pub occurrences: Vec<Occurrence>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub history: Vec<PreviousSource>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed_at: Option<GitProvenance>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GitProvenance {
+    pub revision: String,
+    pub dirty: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -46,6 +55,8 @@ pub struct PreviousSource {
     pub source: String,
     pub source_hash: String,
     pub translations: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed_at: Option<GitProvenance>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -166,6 +177,7 @@ pub fn apply_extraction(
 ) -> Result<ExtractionReport> {
     let config: Config = read_yaml(&root.join(CONFIG_PATH))?;
     let mut state: State = read_yaml(&root.join(STATE_PATH))?;
+    let observed_at = git_provenance(root);
     let mut catalogs: BTreeMap<String, Catalog> = BTreeMap::new();
     for locale in &config.required_locales {
         catalogs.insert(locale.clone(), read_yaml(&catalog_path(root, locale))?);
@@ -230,6 +242,10 @@ pub fn apply_extraction(
                         source: previous_source.clone(),
                         source_hash: hex_sha256(previous_source),
                         translations,
+                        observed_at: state
+                            .messages
+                            .get(previous_source)
+                            .and_then(|message| message.observed_at.clone()),
                     });
                 }
             }
@@ -244,6 +260,7 @@ pub fn apply_extraction(
                 source_hash,
                 occurrences: message.occurrences,
                 history,
+                observed_at: observed_at.clone(),
             },
         );
     }
@@ -267,6 +284,19 @@ pub fn apply_extraction(
 
 fn hex_sha256(source: &str) -> String {
     format!("{:x}", Sha256::digest(source.as_bytes()))
+}
+
+fn git_provenance(root: &Path) -> Option<GitProvenance> {
+    let repo = gix::discover(root).ok()?;
+    let revision = repo.head_id().ok()?.to_string();
+    // `status` includes untracked files, matching the former `git status --porcelain` behavior.
+    let dirty = repo
+        .status(gix::progress::Discard)
+        .ok()
+        .and_then(|status| status.into_iter(Vec::new()).ok())
+        .and_then(|mut entries| entries.next().transpose().ok())
+        .is_some();
+    Some(GitProvenance { revision, dirty })
 }
 
 fn validate_requested_locales(locales: &[String]) -> Result<()> {
@@ -319,5 +349,19 @@ mod tests {
     #[test]
     fn accepts_a_bcp47_style_target_locale() {
         validate_requested_locales(&["uk".into(), "pt-BR".into()]).unwrap();
+    }
+
+    #[test]
+    fn reads_head_provenance_with_gix() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let provenance = git_provenance(&root).expect("the workspace checkout has a HEAD commit");
+
+        assert_eq!(provenance.revision.len(), 40);
+        assert!(
+            provenance
+                .revision
+                .chars()
+                .all(|character| character.is_ascii_hexdigit())
+        );
     }
 }
