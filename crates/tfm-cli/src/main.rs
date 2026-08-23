@@ -1,10 +1,18 @@
 use std::{
     fs,
     path::{Path, PathBuf},
+    process::Stdio,
+    time::Duration,
 };
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
+use serde::Serialize;
+use tokio::{
+    io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
+    process::{ChildStderr, ChildStdin, ChildStdout, Command as TokioCommand},
+    time::timeout,
+};
 use wasmtime::{
     Config, Engine, Store,
     component::{Component, Linker},
@@ -39,6 +47,12 @@ enum Command {
     },
     /// Run the matching local WASM analyzer and update project state plus target catalogs.
     Extract {
+        #[arg(long, default_value = ".")]
+        path: PathBuf,
+        source: PathBuf,
+    },
+    /// Resolve plugin-owned read-only semantic hints through a local language server.
+    LspContext {
         #[arg(long, default_value = ".")]
         path: PathBuf,
         source: PathBuf,
@@ -88,6 +102,10 @@ async fn main() -> Result<()> {
             );
         }
         Command::Extract { path, source } => run_plugin(&path, &source).await?,
+        Command::LspContext { path, source } => {
+            let report = resolve_lsp_context(&path, &source).await?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        }
         Command::TranslatePlan { locale, path } => {
             let plan = tfm_core::translation_plan(&path, &locale)?;
             println!("{}", serde_json::to_string_pretty(&plan)?);
@@ -103,6 +121,250 @@ async fn main() -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[derive(Debug, Serialize)]
+struct LspContextReport {
+    version: u32,
+    language: String,
+    server: String,
+    contexts: Vec<ResolvedContext>,
+}
+
+#[derive(Debug, Serialize)]
+struct ResolvedContext {
+    source: String,
+    anchor: Option<String>,
+    hint: tfm_core::ContextHint,
+    value: Option<serde_json::Value>,
+}
+
+async fn resolve_lsp_context(root: &Path, source_path: &Path) -> Result<LspContextReport> {
+    let language = language_for_path(source_path)?;
+    let (server, args, language_id) = lsp_server(&language)?;
+    let requests = tfm_core::context_requests(root, source_path)?;
+    if requests.is_empty() {
+        bail!(
+            "no plugin semantic context hints for {}; run tfm extract after installing an ABI 0.3 plugin",
+            source_path.display()
+        );
+    }
+
+    let source = fs::read_to_string(source_path)?;
+    let mut client = LspClient::start(server, args, root).await?;
+    client.initialize(root).await?;
+    client.did_open(source_path, language_id, &source).await?;
+
+    let mut contexts = Vec::new();
+    for request in requests {
+        for hint in request.occurrence.context_hints {
+            let value = match hint.kind {
+                tfm_core::ContextKind::Hover => client.hover(source_path, &hint.range).await?,
+            };
+            contexts.push(ResolvedContext {
+                source: request.source.clone(),
+                anchor: request.occurrence.anchor.clone(),
+                hint,
+                value,
+            });
+        }
+    }
+    client.shutdown().await?;
+    Ok(LspContextReport {
+        version: 1,
+        language,
+        server: server.into(),
+        contexts,
+    })
+}
+
+fn lsp_server(language: &str) -> Result<(&'static str, &'static [&'static str], &'static str)> {
+    match language {
+        "rust" => Ok(("rust-analyzer", &[], "rust")),
+        "javascript" => Ok(("typescript-language-server", &["--stdio"], "javascript")),
+        "typescript" => Ok(("typescript-language-server", &["--stdio"], "typescript")),
+        "tsx" => Ok((
+            "typescript-language-server",
+            &["--stdio"],
+            "typescriptreact",
+        )),
+        _ => bail!("no local LSP server configured for `{language}`"),
+    }
+}
+
+struct LspClient {
+    child: tokio::process::Child,
+    stdin: ChildStdin,
+    stdout: BufReader<ChildStdout>,
+    stderr: ChildStderr,
+    next_id: u64,
+}
+
+impl LspClient {
+    async fn start(server: &str, args: &[&str], root: &Path) -> Result<Self> {
+        let mut child = TokioCommand::new(server)
+            .args(args)
+            .current_dir(root)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .with_context(|| format!("start local LSP server `{server}`"))?;
+        let stdin = child
+            .stdin
+            .take()
+            .context("LSP server stdin is unavailable")?;
+        let stdout = child
+            .stdout
+            .take()
+            .context("LSP server stdout is unavailable")?;
+        let stderr = child
+            .stderr
+            .take()
+            .context("LSP server stderr is unavailable")?;
+        Ok(Self {
+            child,
+            stdin,
+            stdout: BufReader::new(stdout),
+            stderr,
+            next_id: 1,
+        })
+    }
+
+    async fn initialize(&mut self, root: &Path) -> Result<()> {
+        let root_uri = file_uri(root.canonicalize()?);
+        self.request(
+            "initialize",
+            serde_json::json!({
+                "processId": null,
+                "rootUri": root_uri,
+                "capabilities": {}
+            }),
+        )
+        .await?;
+        self.notify("initialized", serde_json::json!({})).await
+    }
+
+    async fn did_open(&mut self, path: &Path, language_id: &str, text: &str) -> Result<()> {
+        self.notify(
+            "textDocument/didOpen",
+            serde_json::json!({
+                "textDocument": {
+                    "uri": file_uri(path.canonicalize()?),
+                    "languageId": language_id,
+                    "version": 1,
+                    "text": text
+                }
+            }),
+        )
+        .await
+    }
+
+    async fn hover(
+        &mut self,
+        path: &Path,
+        range: &tfm_core::Range,
+    ) -> Result<Option<serde_json::Value>> {
+        let response = self
+            .request(
+                "textDocument/hover",
+                serde_json::json!({
+                    "textDocument": { "uri": file_uri(path.canonicalize()?) },
+                    "position": {
+                        "line": range.start.line.saturating_sub(1),
+                        "character": range.start.column
+                    }
+                }),
+            )
+            .await?;
+        Ok((!response.is_null()).then_some(response))
+    }
+
+    async fn shutdown(&mut self) -> Result<()> {
+        self.request("shutdown", serde_json::json!(null)).await?;
+        self.notify("exit", serde_json::json!(null)).await?;
+        timeout(Duration::from_secs(2), self.child.wait())
+            .await
+            .context("wait for LSP server shutdown")??;
+        Ok(())
+    }
+
+    async fn request(
+        &mut self,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value> {
+        let id = self.next_id;
+        self.next_id += 1;
+        self.send(serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": method,
+            "params": params
+        }))
+        .await?;
+        loop {
+            let message = timeout(Duration::from_secs(10), self.read_message())
+                .await
+                .context("LSP request timed out")??;
+            if message.get("id") == Some(&serde_json::json!(id)) {
+                if let Some(error) = message.get("error") {
+                    bail!("LSP `{method}` failed: {error}");
+                }
+                return Ok(message
+                    .get("result")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null));
+            }
+        }
+    }
+
+    async fn notify(&mut self, method: &str, params: serde_json::Value) -> Result<()> {
+        self.send(serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": method,
+            "params": params
+        }))
+        .await
+    }
+
+    async fn send(&mut self, message: serde_json::Value) -> Result<()> {
+        let body = serde_json::to_vec(&message)?;
+        self.stdin
+            .write_all(format!("Content-Length: {}\r\n\r\n", body.len()).as_bytes())
+            .await?;
+        self.stdin.write_all(&body).await?;
+        self.stdin.flush().await?;
+        Ok(())
+    }
+
+    async fn read_message(&mut self) -> Result<serde_json::Value> {
+        let mut content_length = None;
+        loop {
+            let mut line = String::new();
+            if self.stdout.read_line(&mut line).await? == 0 {
+                let status = self.child.wait().await?;
+                let mut stderr = String::new();
+                self.stderr.read_to_string(&mut stderr).await?;
+                bail!("LSP server closed stdout with {status}: {}", stderr.trim());
+            }
+            let line = line.trim_end_matches(['\r', '\n']);
+            if line.is_empty() {
+                break;
+            }
+            if let Some(value) = line.strip_prefix("Content-Length:") {
+                content_length = Some(value.trim().parse::<usize>()?);
+            }
+        }
+        let length = content_length.context("LSP response is missing Content-Length")?;
+        let mut body = vec![0_u8; length];
+        self.stdout.read_exact(&mut body).await?;
+        Ok(serde_json::from_slice(&body)?)
+    }
+}
+
+fn file_uri(path: PathBuf) -> String {
+    format!("file://{}", path.to_string_lossy().replace(' ', "%20"))
 }
 
 async fn run_plugin(root: &PathBuf, source_path: &PathBuf) -> Result<()> {
