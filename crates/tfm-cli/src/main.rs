@@ -57,6 +57,11 @@ enum Command {
         path: PathBuf,
         source: PathBuf,
     },
+    /// Print pre-extracted UI strings that still need explicit runtime instrumentation.
+    ImplicitCandidates {
+        #[arg(default_value = ".")]
+        path: PathBuf,
+    },
     /// Print a read-only JSON plan for translations that are still missing.
     TranslatePlan {
         #[arg(long, value_name = "BCP47")]
@@ -105,6 +110,12 @@ async fn main() -> Result<()> {
         Command::LspContext { path, source } => {
             let report = resolve_lsp_context(&path, &source).await?;
             println!("{}", serde_json::to_string_pretty(&report)?);
+        }
+        Command::ImplicitCandidates { path } => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&tfm_core::implicit_candidates(&path)?)?
+            );
         }
         Command::TranslatePlan { locale, path } => {
             let plan = tfm_core::translation_plan(&path, &locale)?;

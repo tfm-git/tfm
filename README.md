@@ -9,6 +9,7 @@ cargo run -p tfm -- init --locale uk --locale pl ./example
 cargo run -p tfm -- check ./example
 cargo run -p tfm -- extract --path ./example ./example/src/settings.ts
 cargo run -p tfm -- lsp-context --path ./example ./example/src/settings.ts
+cargo run -p tfm -- implicit-candidates ./example
 cargo run -p tfm -- translate-plan --locale uk ./example
 cargo run -p tfm -- apply-translations --response translations.json ./example
 ```
@@ -33,6 +34,10 @@ language; it fails if none or more than one plugin matches.
 file through a local, read-only LSP session and prints JSON for a later ACP
 translation prompt. It uses `rust-analyzer` for Rust and
 `typescript-language-server --stdio` for JavaScript, TypeScript and TSX.
+
+`tfm implicit-candidates` prints high-confidence UI strings found without an
+explicit runtime marker. Review this output before a later `tfm fix --mark`
+turns each candidate into a source-code change.
 
 `tfm translate-plan` does not change files. It prints JSON tasks only for
 missing translations, including the source occurrence, prior source text and
