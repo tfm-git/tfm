@@ -82,6 +82,13 @@ pub struct ContextHint {
     pub range: Range,
 }
 
+/// A saved plugin-owned request for read-only semantic context.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ContextRequest {
+    pub source: String,
+    pub occurrence: Occurrence,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ContextKind {
@@ -306,6 +313,23 @@ pub fn translation_plan(root: &Path, requested_locales: &[String]) -> Result<Tra
         response_schema: translation_response_schema(),
         tasks,
     })
+}
+
+/// Return semantic-context requests for one extracted source file without writing project state.
+pub fn context_requests(root: &Path, source_path: &Path) -> Result<Vec<ContextRequest>> {
+    let state: State = read_yaml(&root.join(STATE_PATH))?;
+    let mut requests = Vec::new();
+    for message in state.messages.values() {
+        for occurrence in &message.occurrences {
+            if occurrence.path == source_path && !occurrence.context_hints.is_empty() {
+                requests.push(ContextRequest {
+                    source: message.source.clone(),
+                    occurrence: occurrence.clone(),
+                });
+            }
+        }
+    }
+    Ok(requests)
 }
 
 /// Validate an entire translation response before writing changed target catalogs.
@@ -681,6 +705,10 @@ mod tests {
         assert_eq!(plan.tasks[0].source_hash, hex_sha256("Save changes"));
         assert_eq!(plan.tasks[0].locale, "uk");
         assert_eq!(plan.tasks[0].occurrences, vec![occurrence]);
+        let requests = context_requests(root.path(), Path::new("src/settings.rs")).unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].source, "Save changes");
+        assert_eq!(requests[0].occurrence.context_hints.len(), 1);
         assert_eq!(plan.tasks[0].history[0].source, "Save");
         assert_eq!(
             plan.tasks[0].history[0].translations.get("uk"),
