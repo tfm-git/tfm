@@ -11,6 +11,7 @@ rust-version = "1.97"
 [workspace.dependencies]
 anyhow = "1.0.102"
 clap = { version = "4.5.60", features = ["derive"] }
+gix = { version = "=0.86.0", default-features = false, features = ["sha1", "status"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_yaml = "0.9.34"
 sha2 = "0.10.9"

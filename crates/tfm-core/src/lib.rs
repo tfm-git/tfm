@@ -4,7 +4,6 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
     path::{Path, PathBuf},
-    process::Command,
 };
 
 use anyhow::{Context, Result, bail};
@@ -288,19 +287,15 @@ fn hex_sha256(source: &str) -> String {
 }
 
 fn git_provenance(root: &Path) -> Option<GitProvenance> {
-    let revision = Command::new("git")
-        .args(["-C", root.to_str()?, "rev-parse", "HEAD"])
-        .output()
-        .ok()?;
-    if !revision.status.success() {
-        return None;
-    }
-    let revision = String::from_utf8(revision.stdout).ok()?.trim().to_owned();
-    let dirty = Command::new("git")
-        .args(["-C", root.to_str()?, "status", "--porcelain"])
-        .output()
+    let repo = gix::discover(root).ok()?;
+    let revision = repo.head_id().ok()?.to_string();
+    // `status` includes untracked files, matching the former `git status --porcelain` behavior.
+    let dirty = repo
+        .status(gix::progress::Discard)
         .ok()
-        .is_some_and(|output| !output.stdout.is_empty());
+        .and_then(|status| status.into_iter(Vec::new()).ok())
+        .and_then(|mut entries| entries.next().transpose().ok())
+        .is_some();
     Some(GitProvenance { revision, dirty })
 }
 
@@ -354,5 +349,19 @@ mod tests {
     #[test]
     fn accepts_a_bcp47_style_target_locale() {
         validate_requested_locales(&["uk".into(), "pt-BR".into()]).unwrap();
+    }
+
+    #[test]
+    fn reads_head_provenance_with_gix() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let provenance = git_provenance(&root).expect("the workspace checkout has a HEAD commit");
+
+        assert_eq!(provenance.revision.len(), 40);
+        assert!(
+            provenance
+                .revision
+                .chars()
+                .all(|character| character.is_ascii_hexdigit())
+        );
     }
 }
