@@ -2,7 +2,7 @@
 ///
 /// The host owns filesystem, Git, LSP and LLM capabilities. Plugins receive a
 /// document and return facts; they get no ambient filesystem or network access.
-package tfm:plugin@0.1.0;
+package tfm:plugin@0.2.0;
 
 interface types {
   record position {
@@ -24,6 +24,8 @@ interface types {
   record occurrence {
     range: range,
     symbol: option<string>,
+    /// Stable AST-local identity used to correlate source-text edits.
+    anchor: string,
   }
 
   record message {
