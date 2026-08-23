@@ -36,6 +36,16 @@ pub struct Message {
     pub source_hash: String,
     #[serde(default)]
     pub occurrences: Vec<Occurrence>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub history: Vec<PreviousSource>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PreviousSource {
+    pub source: String,
+    pub source_hash: String,
+    pub translations: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -156,6 +166,26 @@ pub fn apply_extraction(
 ) -> Result<ExtractionReport> {
     let config: Config = read_yaml(&root.join(CONFIG_PATH))?;
     let mut state: State = read_yaml(&root.join(STATE_PATH))?;
+    let mut catalogs: BTreeMap<String, Catalog> = BTreeMap::new();
+    for locale in &config.required_locales {
+        catalogs.insert(locale.clone(), read_yaml(&catalog_path(root, locale))?);
+    }
+    let prior_by_anchor: BTreeMap<_, _> = state
+        .messages
+        .iter()
+        .flat_map(|(source, message)| {
+            message.occurrences.iter().filter_map(move |occurrence| {
+                (occurrence.path == scanned_path)
+                    .then(|| {
+                        occurrence
+                            .anchor
+                            .clone()
+                            .map(|anchor| (anchor, source.clone()))
+                    })
+                    .flatten()
+            })
+        })
+        .collect();
     let scanned_paths = BTreeSet::from([scanned_path.to_path_buf()]);
     for message in state.messages.values_mut() {
         message
@@ -174,6 +204,36 @@ pub fn apply_extraction(
     let mut added = 0;
     for message in extracted {
         let source_hash = hex_sha256(&message.source);
+        let mut history = state
+            .messages
+            .get(&message.source)
+            .map(|existing| existing.history.clone())
+            .unwrap_or_default();
+        for anchor in message
+            .occurrences
+            .iter()
+            .filter_map(|occurrence| occurrence.anchor.as_ref())
+        {
+            if let Some(previous_source) = prior_by_anchor.get(anchor) {
+                if previous_source != &message.source
+                    && !history.iter().any(|entry| entry.source == *previous_source)
+                {
+                    let translations = catalogs
+                        .iter()
+                        .filter_map(|(locale, catalog)| {
+                            catalog
+                                .get(previous_source)
+                                .map(|value| (locale.clone(), value.clone()))
+                        })
+                        .collect();
+                    history.push(PreviousSource {
+                        source: previous_source.clone(),
+                        source_hash: hex_sha256(previous_source),
+                        translations,
+                    });
+                }
+            }
+        }
         if !state.messages.contains_key(&message.source) {
             added += 1;
         }
@@ -183,13 +243,14 @@ pub fn apply_extraction(
                 source: message.source,
                 source_hash,
                 occurrences: message.occurrences,
+                history,
             },
         );
     }
     write_yaml(&root.join(STATE_PATH), &state)?;
     for locale in &config.required_locales {
         let path = catalog_path(root, locale);
-        let mut catalog: Catalog = read_yaml(&path)?;
+        let mut catalog = catalogs.remove(locale).expect("catalog loaded from config");
         for source in &stale {
             catalog.remove(source);
         }
