@@ -10,6 +10,7 @@ cargo run -p tfm -- check ./example
 cargo run -p tfm -- extract --path ./example ./example/src/settings.ts
 cargo run -p tfm -- lsp-context --path ./example ./example/src/settings.ts
 cargo run -p tfm -- implicit-candidates ./example
+cargo run -p tfm -- fix --mark ./example
 cargo run -p tfm -- translate-plan --locale uk ./example
 cargo run -p tfm -- apply-translations --response translations.json ./example
 ```
@@ -36,8 +37,10 @@ translation prompt. It uses `rust-analyzer` for Rust and
 `typescript-language-server --stdio` for JavaScript, TypeScript and TSX.
 
 `tfm implicit-candidates` prints high-confidence UI strings found without an
-explicit runtime marker. Review this output before a later `tfm fix --mark`
-turns each candidate into a source-code change.
+explicit runtime marker. After review, `tfm fix --mark` wraps only the matching
+plain Rust string literals in `t!(...)`. It refuses files outside the project
+root and candidates whose source text changed since extraction; it never marks
+raw string literals automatically.
 
 `tfm translate-plan` does not change files. It prints JSON tasks only for
 missing translations, including the source occurrence, prior source text and

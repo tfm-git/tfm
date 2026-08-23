@@ -2637,6 +2637,7 @@ dependencies = [
  "clap",
  "serde",
  "serde_json",
+ "syn 2.0.119",
  "tempfile",
  "tfm-core",
  "tokio",
