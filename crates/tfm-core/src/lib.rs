@@ -8,6 +8,7 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 pub const CONFIG_PATH: &str = ".l10n/config.yml";
 pub const STATE_PATH: &str = ".l10n/state.yml";
@@ -53,6 +54,12 @@ pub type Catalog = BTreeMap<String, String>;
 pub struct CheckReport {
     pub message_count: usize,
     pub catalog_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExtractedMessage {
+    pub source: String,
+    pub occurrences: Vec<Occurrence>,
 }
 
 pub fn init_project(root: &Path, locales: &[String]) -> Result<()> {
@@ -120,12 +127,52 @@ pub fn check_project(root: &Path) -> Result<CheckReport> {
                 );
             }
         }
+        for (key, translation) in &catalog {
+            if translation.trim().is_empty() {
+                bail!("locales/{locale}.yml is missing a translation for `{key}`");
+            }
+        }
     }
 
     Ok(CheckReport {
         message_count: state.messages.len(),
         catalog_count: config.required_locales.len(),
     })
+}
+
+/// Persist facts returned by a plugin and add untranslated entries to each target catalog.
+pub fn apply_extraction(root: &Path, extracted: Vec<ExtractedMessage>) -> Result<usize> {
+    let config: Config = read_yaml(&root.join(CONFIG_PATH))?;
+    let mut state: State = read_yaml(&root.join(STATE_PATH))?;
+    let mut added = 0;
+    for message in extracted {
+        let source_hash = hex_sha256(&message.source);
+        if !state.messages.contains_key(&message.source) {
+            added += 1;
+        }
+        state.messages.insert(
+            message.source.clone(),
+            Message {
+                source: message.source,
+                source_hash,
+                occurrences: message.occurrences,
+            },
+        );
+    }
+    write_yaml(&root.join(STATE_PATH), &state)?;
+    for locale in &config.required_locales {
+        let path = catalog_path(root, locale);
+        let mut catalog: Catalog = read_yaml(&path)?;
+        for source in state.messages.keys() {
+            catalog.entry(source.clone()).or_default();
+        }
+        write_yaml(&path, &catalog)?;
+    }
+    Ok(added)
+}
+
+fn hex_sha256(source: &str) -> String {
+    format!("{:x}", Sha256::digest(source.as_bytes()))
 }
 
 fn validate_requested_locales(locales: &[String]) -> Result<()> {
