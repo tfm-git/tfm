@@ -12,6 +12,7 @@ use sha2::{Digest, Sha256};
 
 pub const CONFIG_PATH: &str = ".l10n/config.yml";
 pub const STATE_PATH: &str = ".l10n/state.yml";
+pub const PLUGIN_DIR: &str = ".l10n/plugins";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -159,6 +160,7 @@ pub fn init_project(root: &Path, locales: &[String]) -> Result<()> {
     }
 
     fs::create_dir_all(config_path.parent().expect("config has a parent"))?;
+    fs::create_dir_all(root.join(PLUGIN_DIR))?;
     fs::create_dir_all(root.join("locales"))?;
 
     let config = Config {
@@ -545,6 +547,14 @@ mod tests {
     #[test]
     fn accepts_a_bcp47_style_target_locale() {
         validate_requested_locales(&["uk".into(), "pt-BR".into()]).unwrap();
+    }
+
+    #[test]
+    fn initializes_a_local_plugin_directory() {
+        let root = tempfile::tempdir().unwrap();
+        init_project(root.path(), &["uk".into()]).unwrap();
+
+        assert!(root.path().join(PLUGIN_DIR).is_dir());
     }
 
     #[test]

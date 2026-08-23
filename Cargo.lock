@@ -2626,6 +2626,7 @@ dependencies = [
  "anyhow",
  "clap",
  "serde_json",
+ "tempfile",
  "tfm-core",
  "tokio",
  "wasmtime",
