@@ -89,6 +89,13 @@ pub struct ContextRequest {
     pub occurrence: Occurrence,
 }
 
+/// A high-confidence UI string extracted without an explicit runtime marker.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ImplicitCandidate {
+    pub source: String,
+    pub occurrence: Occurrence,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ContextKind {
@@ -330,6 +337,27 @@ pub fn context_requests(root: &Path, source_path: &Path) -> Result<Vec<ContextRe
         }
     }
     Ok(requests)
+}
+
+/// Return UI strings found by a pre-extractor that still need runtime instrumentation.
+pub fn implicit_candidates(root: &Path) -> Result<Vec<ImplicitCandidate>> {
+    let state: State = read_yaml(&root.join(STATE_PATH))?;
+    let mut candidates = Vec::new();
+    for message in state.messages.values() {
+        for occurrence in &message.occurrences {
+            if occurrence
+                .anchor
+                .as_deref()
+                .is_some_and(|anchor| anchor.starts_with("implicit::"))
+            {
+                candidates.push(ImplicitCandidate {
+                    source: message.source.clone(),
+                    occurrence: occurrence.clone(),
+                });
+            }
+        }
+    }
+    Ok(candidates)
 }
 
 /// Validate an entire translation response before writing changed target catalogs.
