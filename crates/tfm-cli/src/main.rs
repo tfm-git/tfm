@@ -71,6 +71,9 @@ enum Command {
         /// Wrap implicit Rust UI strings in t!(...) markers.
         #[arg(long)]
         mark: bool,
+        /// Rust macro path to use, for example tfm_runtime::t.
+        #[arg(long = "macro", default_value = "t")]
+        macro_path: String,
         #[arg(default_value = ".")]
         path: PathBuf,
     },
@@ -136,11 +139,16 @@ async fn main() -> Result<()> {
                 serde_json::to_string_pretty(&tfm_core::implicit_candidates(&path)?)?
             );
         }
-        Command::Fix { mark, path } => {
+        Command::Fix {
+            mark,
+            macro_path,
+            path,
+        } => {
             if !mark {
                 bail!("choose a fix mode, for example `tfm fix --mark`");
             }
-            let changed = mark_implicit_candidates(&path)?;
+            validate_rust_macro_path(&macro_path)?;
+            let changed = mark_implicit_candidates(&path, &macro_path)?;
             println!("marked {changed} implicit UI strings");
         }
         Command::TranslatePlan { locale, path } => {
@@ -160,7 +168,7 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-fn mark_implicit_candidates(root: &Path) -> Result<usize> {
+fn mark_implicit_candidates(root: &Path, macro_path: &str) -> Result<usize> {
     let root = root.canonicalize()?;
     let mut by_path: BTreeMap<PathBuf, Vec<tfm_core::ImplicitCandidate>> = BTreeMap::new();
     for candidate in tfm_core::implicit_candidates(&root)? {
@@ -183,7 +191,7 @@ fn mark_implicit_candidates(root: &Path) -> Result<usize> {
     let mut changed = 0;
     for (path, occurrences) in by_path {
         let source = fs::read_to_string(&path)?;
-        let (updated, count) = mark_source_literals(&source, &occurrences)?;
+        let (updated, count) = mark_source_literals(&source, &occurrences, macro_path)?;
         if count > 0 {
             fs::write(&path, updated)?;
             changed += count;
@@ -195,6 +203,7 @@ fn mark_implicit_candidates(root: &Path) -> Result<usize> {
 fn mark_source_literals(
     source: &str,
     candidates: &[tfm_core::ImplicitCandidate],
+    macro_path: &str,
 ) -> Result<(String, usize)> {
     let mut edits = candidates
         .iter()
@@ -234,11 +243,26 @@ fn mark_source_literals(
                 candidate.occurrence.column
             );
         }
-        updated.replace_range(start..end, &format!("t!({literal})"));
+        updated.replace_range(start..end, &format!("{macro_path}!({literal})"));
         changed += 1;
         previously_marked = Some(start);
     }
     Ok((updated, changed))
+}
+
+fn validate_rust_macro_path(macro_path: &str) -> Result<()> {
+    if macro_path.split("::").all(|segment| {
+        !segment.is_empty()
+            && segment.chars().enumerate().all(|(index, character)| {
+                character == '_'
+                    || character.is_ascii_alphanumeric()
+                        && (index > 0 || !character.is_ascii_digit())
+            })
+    }) {
+        Ok(())
+    } else {
+        bail!("`{macro_path}` is not a valid Rust macro path")
+    }
 }
 
 fn offset_for_position(source: &str, line: u32, column: u32) -> Result<usize> {
@@ -752,7 +776,9 @@ fn language_for_path(path: &Path) -> Result<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{language_for_path, mark_source_literals, supported_source_files};
+    use super::{
+        language_for_path, mark_source_literals, supported_source_files, validate_rust_macro_path,
+    };
     use std::{
         fs,
         path::{Path, PathBuf},
@@ -827,6 +853,7 @@ mod tests {
                 implicit_candidate("Save", save),
                 implicit_candidate("Settings", settings),
             ],
+            "t",
         )
         .unwrap();
 
@@ -846,6 +873,7 @@ mod tests {
                 "Say \"hello\"",
                 source.find('"').unwrap() as u32,
             )],
+            "t",
         )
         .unwrap();
 
@@ -859,9 +887,30 @@ mod tests {
         let error = mark_source_literals(
             source,
             &[implicit_candidate("Save", source.find('"').unwrap() as u32)],
+            "t",
         )
         .unwrap_err();
 
         assert!(error.to_string().contains("changed since extraction"));
+    }
+
+    #[test]
+    fn supports_a_qualified_runtime_macro_path() {
+        let source = "let label = \"Save\";\n";
+        let (updated, changed) = mark_source_literals(
+            source,
+            &[implicit_candidate("Save", source.find('"').unwrap() as u32)],
+            "tfm_runtime::t",
+        )
+        .unwrap();
+
+        assert_eq!(changed, 1);
+        assert_eq!(updated, "let label = tfm_runtime::t!(\"Save\");\n");
+    }
+
+    #[test]
+    fn rejects_an_invalid_macro_path() {
+        assert!(validate_rust_macro_path("tfm-runtime::t").is_err());
+        assert!(validate_rust_macro_path("tfm_runtime::t").is_ok());
     }
 }
