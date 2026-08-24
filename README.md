@@ -67,6 +67,9 @@ plain Rust string literals in `t!(...)`. It refuses files outside the project
 root and candidates whose source text changed since extraction; it never marks
 raw string literals automatically. To avoid adding an import, use the runtime
 macro path directly: `tfm fix --mark --macro tfm_runtime::t ./project`.
+Candidates from UI `format!("…")` calls are reported as `review` and are not
+rewritten automatically; convert them explicitly to the named runtime-template
+form, for example `tfm_runtime::t!("YAML: {name}", name = name)`.
 
 `tfm translate-plan` does not change files. It prints JSON tasks only for
 missing translations, including the source occurrence, prior source text and

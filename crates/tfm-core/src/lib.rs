@@ -94,6 +94,15 @@ pub struct ContextRequest {
 pub struct ImplicitCandidate {
     pub source: String,
     pub occurrence: Occurrence,
+    pub disposition: ImplicitCandidateDisposition,
+}
+
+/// Whether TFM can safely apply its generic source marker to a candidate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ImplicitCandidateDisposition {
+    Mark,
+    Review,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -353,6 +362,15 @@ pub fn implicit_candidates(root: &Path) -> Result<Vec<ImplicitCandidate>> {
                 candidates.push(ImplicitCandidate {
                     source: message.source.clone(),
                     occurrence: occurrence.clone(),
+                    disposition: if occurrence
+                        .anchor
+                        .as_deref()
+                        .is_some_and(|anchor| anchor.contains("-format"))
+                    {
+                        ImplicitCandidateDisposition::Review
+                    } else {
+                        ImplicitCandidateDisposition::Mark
+                    },
                 });
             }
         }
@@ -637,6 +655,41 @@ mod tests {
         init_project(root.path(), &["uk".into()]).unwrap();
 
         assert!(root.path().join(PLUGIN_DIR).is_dir());
+    }
+
+    #[test]
+    fn classifies_formatted_implicit_candidates_as_review_only() {
+        let root = tempfile::tempdir().unwrap();
+        init_project(root.path(), &["uk".into()]).unwrap();
+        let state = State {
+            version: 1,
+            messages: BTreeMap::from([(
+                "YAML: {name}".into(),
+                Message {
+                    source: "YAML: {name}".into(),
+                    source_hash: hex_sha256("YAML: {name}"),
+                    occurrences: vec![Occurrence {
+                        path: PathBuf::from("src/view.rs"),
+                        line: 1,
+                        column: 20,
+                        symbol: Some("view".into()),
+                        anchor: Some("implicit::view::child-format".into()),
+                        context_hints: vec![],
+                    }],
+                    history: vec![],
+                    observed_at: None,
+                },
+            )]),
+        };
+        write_yaml(&root.path().join(STATE_PATH), &state).unwrap();
+
+        let candidates = implicit_candidates(root.path()).unwrap();
+
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(
+            candidates[0].disposition,
+            ImplicitCandidateDisposition::Review
+        );
     }
 
     #[test]

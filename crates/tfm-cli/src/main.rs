@@ -148,8 +148,11 @@ async fn main() -> Result<()> {
                 bail!("choose a fix mode, for example `tfm fix --mark`");
             }
             validate_rust_macro_path(&macro_path)?;
-            let changed = mark_implicit_candidates(&path, &macro_path)?;
-            println!("marked {changed} implicit UI strings");
+            let report = mark_implicit_candidates(&path, &macro_path)?;
+            println!(
+                "marked {} implicit UI strings; {} require review",
+                report.marked, report.review_required
+            );
         }
         Command::TranslatePlan { locale, path } => {
             let plan = tfm_core::translation_plan(&path, &locale)?;
@@ -168,10 +171,23 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-fn mark_implicit_candidates(root: &Path, macro_path: &str) -> Result<usize> {
+struct MarkReport {
+    marked: usize,
+    review_required: usize,
+}
+
+fn mark_implicit_candidates(root: &Path, macro_path: &str) -> Result<MarkReport> {
     let root = root.canonicalize()?;
     let mut by_path: BTreeMap<PathBuf, Vec<tfm_core::ImplicitCandidate>> = BTreeMap::new();
-    for candidate in tfm_core::implicit_candidates(&root)? {
+    let candidates = tfm_core::implicit_candidates(&root)?;
+    let review_required = candidates
+        .iter()
+        .filter(|candidate| candidate.disposition == tfm_core::ImplicitCandidateDisposition::Review)
+        .count();
+    for candidate in candidates
+        .into_iter()
+        .filter(|candidate| candidate.disposition == tfm_core::ImplicitCandidateDisposition::Mark)
+    {
         let path = candidate.occurrence.path.canonicalize().with_context(|| {
             format!(
                 "resolve implicit candidate path {}",
@@ -197,7 +213,10 @@ fn mark_implicit_candidates(root: &Path, macro_path: &str) -> Result<usize> {
             changed += count;
         }
     }
-    Ok(changed)
+    Ok(MarkReport {
+        marked: changed,
+        review_required,
+    })
 }
 
 fn mark_source_literals(
@@ -784,7 +803,7 @@ mod tests {
         path::{Path, PathBuf},
     };
     use tempfile::tempdir;
-    use tfm_core::{ImplicitCandidate, Occurrence};
+    use tfm_core::{ImplicitCandidate, ImplicitCandidateDisposition, Occurrence};
 
     fn implicit_candidate(source: &str, column: u32) -> ImplicitCandidate {
         ImplicitCandidate {
@@ -797,6 +816,7 @@ mod tests {
                 anchor: Some("implicit::gpui".into()),
                 context_hints: Vec::new(),
             },
+            disposition: ImplicitCandidateDisposition::Mark,
         }
     }
 
