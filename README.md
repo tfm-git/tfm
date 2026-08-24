@@ -58,7 +58,8 @@ translation prompt. It uses `rust-analyzer` for Rust and
 explicit runtime marker. After review, `tfm fix --mark` wraps only the matching
 plain Rust string literals in `t!(...)`. It refuses files outside the project
 root and candidates whose source text changed since extraction; it never marks
-raw string literals automatically.
+raw string literals automatically. To avoid adding an import, use the runtime
+macro path directly: `tfm fix --mark --macro tfm_runtime::t ./project`.
 
 `tfm translate-plan` does not change files. It prints JSON tasks only for
 missing translations, including the source occurrence, prior source text and
