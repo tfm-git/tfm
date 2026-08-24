@@ -8,6 +8,7 @@ Git.
 cargo run -p tfm -- init --locale uk --locale pl ./example
 cargo run -p tfm -- check ./example
 cargo run -p tfm -- extract --path ./example ./example/src/settings.ts
+cargo run -p tfm -- extract --all --path ./example
 cargo run -p tfm -- lsp-context --path ./example ./example/src/settings.ts
 cargo run -p tfm -- implicit-candidates ./example
 cargo run -p tfm -- fix --mark ./example
@@ -45,6 +46,8 @@ runtime.
 Copy each analyzer WASM Component into `.l10n/plugins/`. `tfm extract` reads
 their manifests and selects the one that declares support for the source file's
 language; it fails if none or more than one plugin matches.
+`tfm extract --all` recursively processes supported source files and skips
+`.git`, `.l10n`, `node_modules`, and `target` directories.
 
 `tfm lsp-context` resolves the plugin-owned semantic hints for one extracted
 file through a local, read-only LSP session and prints JSON for a later ACP

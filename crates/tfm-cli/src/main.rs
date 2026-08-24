@@ -50,7 +50,10 @@ enum Command {
     Extract {
         #[arg(long, default_value = ".")]
         path: PathBuf,
-        source: PathBuf,
+        /// Extract every supported source file below the project root.
+        #[arg(long, conflicts_with = "source")]
+        all: bool,
+        source: Option<PathBuf>,
     },
     /// Resolve plugin-owned read-only semantic hints through a local language server.
     LspContext {
@@ -115,7 +118,14 @@ async fn main() -> Result<()> {
                 report.message_count, report.catalog_count
             );
         }
-        Command::Extract { path, source } => run_plugin(&path, &source).await?,
+        Command::Extract { path, all, source } => {
+            if all {
+                run_all_plugins(&path).await?;
+            } else {
+                let source = source.context("provide a source file or pass `--all`")?;
+                run_plugin(&path, &source).await?;
+            }
+        }
         Command::LspContext { path, source } => {
             let report = resolve_lsp_context(&path, &source).await?;
             println!("{}", serde_json::to_string_pretty(&report)?);
@@ -506,11 +516,51 @@ fn file_uri(path: PathBuf) -> String {
     format!("file://{}", path.to_string_lossy().replace(' ', "%20"))
 }
 
-async fn run_plugin(root: &PathBuf, source_path: &PathBuf) -> Result<()> {
+async fn run_plugin(root: &Path, source_path: &Path) -> Result<()> {
     let source = fs::read_to_string(source_path)?;
     let language = language_for_path(source_path)?;
     let plugin_path = discover_plugin(root, &language).await?;
     run_plugin_at(&plugin_path, root, source_path, source, language).await
+}
+
+async fn run_all_plugins(root: &Path) -> Result<()> {
+    let root = root.canonicalize()?;
+    let sources = supported_source_files(&root)?;
+    if sources.is_empty() {
+        bail!("no supported source files found below {}", root.display());
+    }
+    for source in &sources {
+        run_plugin(&root, source).await?;
+    }
+    println!("extracted {} source files", sources.len());
+    Ok(())
+}
+
+fn supported_source_files(root: &Path) -> Result<Vec<PathBuf>> {
+    const IGNORED_DIRECTORIES: &[&str] = &[".git", ".l10n", "node_modules", "target"];
+
+    fn visit(directory: &Path, sources: &mut Vec<PathBuf>) -> Result<()> {
+        for entry in fs::read_dir(directory)
+            .with_context(|| format!("read source directory {}", directory.display()))?
+        {
+            let entry = entry?;
+            let file_type = entry.file_type()?;
+            let path = entry.path();
+            if file_type.is_dir() {
+                if !IGNORED_DIRECTORIES.contains(&entry.file_name().to_string_lossy().as_ref()) {
+                    visit(&path, sources)?;
+                }
+            } else if file_type.is_file() && language_for_path(&path).is_ok() {
+                sources.push(path);
+            }
+        }
+        Ok(())
+    }
+
+    let mut sources = Vec::new();
+    visit(root, &mut sources)?;
+    sources.sort();
+    Ok(sources)
 }
 
 async fn discover_plugin(root: &Path, language: &str) -> Result<PathBuf> {
@@ -702,8 +752,12 @@ fn language_for_path(path: &Path) -> Result<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{language_for_path, mark_source_literals};
-    use std::path::{Path, PathBuf};
+    use super::{language_for_path, mark_source_literals, supported_source_files};
+    use std::{
+        fs,
+        path::{Path, PathBuf},
+    };
+    use tempfile::tempdir;
     use tfm_core::{ImplicitCandidate, Occurrence};
 
     fn implicit_candidate(source: &str, column: u32) -> ImplicitCandidate {
@@ -732,6 +786,33 @@ mod tests {
             "typescript"
         );
         assert_eq!(language_for_path(Path::new("view.tsx")).unwrap(), "tsx");
+    }
+
+    #[test]
+    fn finds_supported_sources_and_skips_build_artifacts() {
+        let project = tempdir().unwrap();
+        fs::create_dir_all(project.path().join("src/nested")).unwrap();
+        fs::create_dir_all(project.path().join("target/debug")).unwrap();
+        fs::create_dir_all(project.path().join(".l10n/plugins")).unwrap();
+        fs::write(project.path().join("src/main.rs"), "fn main() {}").unwrap();
+        fs::write(project.path().join("src/nested/view.tsx"), "export {};").unwrap();
+        fs::write(project.path().join("target/debug/generated.rs"), "").unwrap();
+        fs::write(project.path().join(".l10n/plugins/generated.ts"), "").unwrap();
+        fs::write(project.path().join("README.md"), "").unwrap();
+
+        let sources = supported_source_files(project.path()).unwrap();
+        let relative = sources
+            .iter()
+            .map(|path| path.strip_prefix(project.path()).unwrap().to_path_buf())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            relative,
+            vec![
+                PathBuf::from("src/main.rs"),
+                PathBuf::from("src/nested/view.tsx")
+            ]
+        );
     }
 
     #[test]
