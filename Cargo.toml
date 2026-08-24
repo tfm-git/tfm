@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/tfm-core", "crates/tfm-cli"]
+members = ["crates/tfm-core", "crates/tfm-cli", "crates/tfm-runtime"]
 resolver = "3"
 
 [workspace.package]

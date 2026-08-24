@@ -27,6 +27,21 @@ locales/pl.yml
 
 There is intentionally no `locales/en.yml`.
 
+Rust applications can use the framework-neutral `tfm-runtime` crate. Load a
+target catalog, activate its locale, and import its source-literal macro:
+
+```rust
+use tfm_runtime::{activate_locale, load_catalog_file, t};
+
+load_catalog_file("uk", "locales/uk.yml")?;
+activate_locale("uk");
+let label = t!("Save");
+```
+
+`t!` returns the English source text until an active catalog contains a
+translation, so a missing target entry remains visible instead of failing at
+runtime.
+
 Copy each analyzer WASM Component into `.l10n/plugins/`. `tfm extract` reads
 their manifests and selects the one that declares support for the source file's
 language; it fails if none or more than one plugin matches.
