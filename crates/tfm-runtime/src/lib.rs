@@ -71,9 +71,27 @@ pub fn translate(source: &str) -> String {
         .unwrap_or_else(|| source.into())
 }
 
+/// Translate a source template and substitute named values in `{name}` placeholders.
+///
+/// Unknown placeholders are deliberately left visible so a catalog entry cannot silently
+/// lose data when its source changes.
+pub fn translate_with_args(source: &str, arguments: &[(&str, String)]) -> String {
+    let mut translated = translate(source);
+    for (name, value) in arguments {
+        translated = translated.replace(&format!("{{{name}}}"), value);
+    }
+    translated
+}
+
 /// Translate an English source literal using the active target-locale catalog.
 #[macro_export]
 macro_rules! t {
+    ($source:literal, $($name:ident = $value:expr),+ $(,)?) => {{
+        $crate::translate_with_args(
+            $source,
+            &[$((stringify!($name), format!("{}", $value))),+],
+        )
+    }};
     ($source:literal) => {{ $crate::translate($source) }};
 }
 
@@ -106,7 +124,7 @@ impl StdError for CatalogError {
 
 #[cfg(test)]
 mod tests {
-    use super::{activate_locale, load_catalog_yaml, translate};
+    use super::{activate_locale, load_catalog_yaml, translate, translate_with_args};
 
     #[test]
     fn translates_from_the_active_catalog_and_falls_back_to_source() {
@@ -116,5 +134,20 @@ mod tests {
         assert_eq!(translate("Save"), "Зберегти");
         assert_eq!(crate::t!("Save"), "Зберегти");
         assert_eq!(translate("Cancel"), "Cancel");
+    }
+
+    #[test]
+    fn substitutes_named_template_arguments_after_translation() {
+        load_catalog_yaml("uk", "\"YAML: {name}\": \"YAML: {name}\"\n").unwrap();
+        activate_locale("uk");
+
+        assert_eq!(
+            translate_with_args("YAML: {name}", &[("name", "config.yml".into())]),
+            "YAML: config.yml"
+        );
+        assert_eq!(
+            crate::t!("YAML: {name}", name = "config.yml"),
+            "YAML: config.yml"
+        );
     }
 }

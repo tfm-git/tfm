@@ -43,6 +43,13 @@ let label = t!("Save");
 translation, so a missing target entry remains visible instead of failing at
 runtime.
 
+For a dynamic value, use a named placeholder and an explicit argument. The
+translation may reposition `{name}`, while an unknown placeholder stays visible:
+
+```rust
+let title = t!("YAML: {name}", name = resource_name);
+```
+
 Copy each analyzer WASM Component into `.l10n/plugins/`. `tfm extract` reads
 their manifests and selects the one that declares support for the source file's
 language; it fails if none or more than one plugin matches.
