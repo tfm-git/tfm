@@ -71,6 +71,9 @@ enum Command {
         /// Wrap implicit Rust UI strings in t!(...) markers.
         #[arg(long)]
         mark: bool,
+        /// Rewrite safe implicit `format!("…{name}…")` UI templates.
+        #[arg(long, conflicts_with = "mark")]
+        mark_formats: bool,
         /// Rust macro path to use, for example tfm_runtime::t.
         #[arg(long = "macro", default_value = "t")]
         macro_path: String,
@@ -141,14 +144,18 @@ async fn main() -> Result<()> {
         }
         Command::Fix {
             mark,
+            mark_formats,
             macro_path,
             path,
         } => {
-            if !mark {
-                bail!("choose a fix mode, for example `tfm fix --mark`");
-            }
+            let mode = match (mark, mark_formats) {
+                (true, false) => MarkMode::Plain,
+                (false, true) => MarkMode::Format,
+                (false, false) => bail!("choose a fix mode, for example `tfm fix --mark`"),
+                (true, true) => unreachable!("clap rejects conflicting fix modes"),
+            };
             validate_rust_macro_path(&macro_path)?;
-            let report = mark_implicit_candidates(&path, &macro_path)?;
+            let report = mark_implicit_candidates(&path, &macro_path, mode)?;
             println!(
                 "marked {} implicit UI strings; {} require review",
                 report.marked, report.review_required
@@ -176,18 +183,24 @@ struct MarkReport {
     review_required: usize,
 }
 
-fn mark_implicit_candidates(root: &Path, macro_path: &str) -> Result<MarkReport> {
+#[derive(Clone, Copy)]
+enum MarkMode {
+    Plain,
+    Format,
+}
+
+fn mark_implicit_candidates(root: &Path, macro_path: &str, mode: MarkMode) -> Result<MarkReport> {
     let root = root.canonicalize()?;
     let mut by_path: BTreeMap<PathBuf, Vec<tfm_core::ImplicitCandidate>> = BTreeMap::new();
     let candidates = tfm_core::implicit_candidates(&root)?;
-    let review_required = candidates
+    let review_candidates = candidates
         .iter()
         .filter(|candidate| candidate.disposition == tfm_core::ImplicitCandidateDisposition::Review)
         .count();
-    for candidate in candidates
-        .into_iter()
-        .filter(|candidate| candidate.disposition == tfm_core::ImplicitCandidateDisposition::Mark)
-    {
+    for candidate in candidates.into_iter().filter(|candidate| match mode {
+        MarkMode::Plain => candidate.disposition == tfm_core::ImplicitCandidateDisposition::Mark,
+        MarkMode::Format => candidate.disposition == tfm_core::ImplicitCandidateDisposition::Review,
+    }) {
         let path = candidate.occurrence.path.canonicalize().with_context(|| {
             format!(
                 "resolve implicit candidate path {}",
@@ -205,18 +218,124 @@ fn mark_implicit_candidates(root: &Path, macro_path: &str) -> Result<MarkReport>
     }
 
     let mut changed = 0;
+    let mut skipped = 0;
     for (path, occurrences) in by_path {
         let source = fs::read_to_string(&path)?;
-        let (updated, count) = mark_source_literals(&source, &occurrences, macro_path)?;
+        let (updated, count, source_skipped) = match mode {
+            MarkMode::Plain => {
+                let (updated, count) = mark_source_literals(&source, &occurrences, macro_path)?;
+                (updated, count, 0)
+            }
+            MarkMode::Format => mark_source_format_literals(&source, &occurrences, macro_path)?,
+        };
         if count > 0 {
             fs::write(&path, updated)?;
             changed += count;
         }
+        skipped += source_skipped;
     }
     Ok(MarkReport {
         marked: changed,
-        review_required,
+        review_required: match mode {
+            MarkMode::Plain => review_candidates,
+            MarkMode::Format => skipped,
+        },
     })
+}
+
+fn mark_source_format_literals(
+    source: &str,
+    candidates: &[tfm_core::ImplicitCandidate],
+    macro_path: &str,
+) -> Result<(String, usize, usize)> {
+    let mut edits = Vec::new();
+    let mut skipped = 0;
+    for candidate in candidates {
+        let literal_start = offset_for_position(
+            source,
+            candidate.occurrence.line,
+            candidate.occurrence.column,
+        )?;
+        let literal_end = rust_string_literal_end(&source[literal_start..]).with_context(|| {
+            format!(
+                "expected a plain Rust string literal at {}:{}",
+                candidate.occurrence.line, candidate.occurrence.column
+            )
+        })? + literal_start;
+        let literal = &source[literal_start..literal_end];
+        if syn::parse_str::<syn::LitStr>(literal)
+            .context("implicit candidate no longer points at a valid Rust string literal")?
+            .value()
+            != candidate.source
+        {
+            bail!(
+                "implicit candidate at {}:{} changed since extraction; run `tfm extract` and review again",
+                candidate.occurrence.line,
+                candidate.occurrence.column
+            );
+        }
+        let Some(format_start) = literal_start.checked_sub("format!(".len()) else {
+            skipped += 1;
+            continue;
+        };
+        if &source[format_start..literal_start] != "format!("
+            || !source[literal_end..].starts_with(')')
+        {
+            skipped += 1;
+            continue;
+        }
+        let Some(names) = named_template_arguments(&candidate.source) else {
+            skipped += 1;
+            continue;
+        };
+        let arguments = names
+            .iter()
+            .map(|name| format!(", {name} = {name}"))
+            .collect::<String>();
+        edits.push((
+            format_start,
+            literal_end + 1,
+            format!("{macro_path}!({literal}{arguments})"),
+        ));
+    }
+
+    edits.sort_by_key(|(start, _, _)| std::cmp::Reverse(*start));
+    let mut updated = source.to_owned();
+    let mut changed = 0;
+    for (start, end, replacement) in edits {
+        updated.replace_range(start..end, &replacement);
+        changed += 1;
+    }
+    Ok((updated, changed, skipped))
+}
+
+fn named_template_arguments(template: &str) -> Option<Vec<String>> {
+    let mut names = Vec::new();
+    let mut rest = template;
+    while let Some(open) = rest.find('{') {
+        if rest[..open].contains('}') {
+            return None;
+        }
+        let after_open = &rest[open + 1..];
+        let close = after_open.find('}')?;
+        let name = &after_open[..close];
+        if !is_rust_identifier(name) {
+            return None;
+        }
+        if !names.iter().any(|existing| existing == name) {
+            names.push(name.into());
+        }
+        rest = &after_open[close + 1..];
+    }
+    (!rest.contains('}')).then_some(names)
+}
+
+fn is_rust_identifier(value: &str) -> bool {
+    !value.is_empty()
+        && value.chars().enumerate().all(|(index, character)| {
+            character == '_'
+                || character.is_ascii_alphanumeric() && (index > 0 || !character.is_ascii_digit())
+        })
 }
 
 fn mark_source_literals(
@@ -796,7 +915,8 @@ fn language_for_path(path: &Path) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        language_for_path, mark_source_literals, supported_source_files, validate_rust_macro_path,
+        language_for_path, mark_source_format_literals, mark_source_literals,
+        named_template_arguments, supported_source_files, validate_rust_macro_path,
     };
     use std::{
         fs,
@@ -818,6 +938,13 @@ mod tests {
             },
             disposition: ImplicitCandidateDisposition::Mark,
         }
+    }
+
+    fn formatted_candidate(source: &str, column: u32) -> ImplicitCandidate {
+        let mut candidate = implicit_candidate(source, column);
+        candidate.disposition = ImplicitCandidateDisposition::Review;
+        candidate.occurrence.anchor = Some("implicit::view::child-format".into());
+        candidate
     }
 
     #[test]
@@ -932,5 +1059,36 @@ mod tests {
     fn rejects_an_invalid_macro_path() {
         assert!(validate_rust_macro_path("tfm-runtime::t").is_err());
         assert!(validate_rust_macro_path("tfm_runtime::t").is_ok());
+    }
+
+    #[test]
+    fn marks_simple_implicit_format_templates_with_named_arguments() {
+        let source = "let title = format!(\"YAML: {name}\");\n";
+        let (updated, changed, skipped) = mark_source_format_literals(
+            source,
+            &[formatted_candidate(
+                "YAML: {name}",
+                source.find('"').unwrap() as u32,
+            )],
+            "tfm_runtime::t",
+        )
+        .unwrap();
+
+        assert_eq!(changed, 1);
+        assert_eq!(skipped, 0);
+        assert_eq!(
+            updated,
+            "let title = tfm_runtime::t!(\"YAML: {name}\", name = name);\n"
+        );
+    }
+
+    #[test]
+    fn keeps_complex_format_templates_for_review() {
+        assert_eq!(
+            named_template_arguments("YAML: {name}"),
+            Some(vec!["name".into()])
+        );
+        assert_eq!(named_template_arguments("Width: {width:.2}"), None);
+        assert_eq!(named_template_arguments("Literal {{brace}}"), None);
     }
 }
